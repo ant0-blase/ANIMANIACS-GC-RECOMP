@@ -1,0 +1,80 @@
+# -----------------------------------------------------------------------------
+# Original game data - never commit
+# -----------------------------------------------------------------------------
+/iso/
+/extracted/
+
+# -----------------------------------------------------------------------------
+# Generated static recompilation output
+# -----------------------------------------------------------------------------
+/recomp-c/
+/recomp-llvm/
+/port-build/
+/port-build-*/
+/module/
+/runtime/
+
+# -----------------------------------------------------------------------------
+# Build trees and caches
+# -----------------------------------------------------------------------------
+/build/
+/build-*/
+/.cache/
+/.build.lock
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Nested ModernGekko local build directories
+/ModernGekko/build/
+/ModernGekko/build-*/
+/ModernGekko/.cache/
+
+# -----------------------------------------------------------------------------
+# Runtime/user state
+# -----------------------------------------------------------------------------
+/user/
+/perf/
+perf.data
+perf.data.*
+*.log
+*.trace
+*.prof
+
+# Decoder / local analysis reports
+/unknown-opcodes*.csv
+
+# -----------------------------------------------------------------------------
+# Native binaries and generated libraries
+# -----------------------------------------------------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+
+# -----------------------------------------------------------------------------
+# Editor / OS noise
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local scratch / backup files
+*.bak
+*.bak[0-9]*
+*.orig
+*.rej
+*.pre-*

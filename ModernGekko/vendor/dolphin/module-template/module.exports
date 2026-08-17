@@ -1,0 +1,7 @@
+{
+  global:
+    ppc_set_mem_write_journal;
+    staticrecomp_get_module;
+  local:
+    *;
+};

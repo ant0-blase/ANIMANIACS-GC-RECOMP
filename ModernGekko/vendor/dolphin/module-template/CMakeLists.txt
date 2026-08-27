@@ -129,6 +129,18 @@ if(UNIX AND NOT APPLE)
     "${CMAKE_CURRENT_SOURCE_DIR}/module.exports")
 endif()
 
+option(RECOMPCORE_MODULE_GAMECUBE_MEM1_ONLY
+       "Assume retail GameCube 24 MiB MEM1 in generated memory helpers" OFF)
+if(RECOMPCORE_MODULE_GAMECUBE_MEM1_ONLY)
+  target_compile_definitions(${MODULE_NAME} PRIVATE GXRUNTIME_GAMECUBE_MEM1_ONLY)
+endif()
+
+option(RECOMPCORE_MODULE_ENABLE_MEM_JOURNAL
+       "Compile the lockstep RAM-write journal into the module" OFF)
+if(RECOMPCORE_MODULE_ENABLE_MEM_JOURNAL)
+  target_compile_definitions(${MODULE_NAME} PRIVATE GXRUNTIME_ENABLE_MEM_JOURNAL)
+endif()
+
 option(RECOMPCORE_MODULE_ENABLE_IPO "Enable Clang module interprocedural optimization when supported" ON)
 set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
     "Optimization level for generated module translation units (0, 1, 2, or 3)")

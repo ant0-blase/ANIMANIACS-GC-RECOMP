@@ -34,6 +34,8 @@ void StaticRecompCore::Run()
   m_guest.ram_size = memory.GetRamSizeReal();
   m_guest.exram = memory.GetEXRAM();
   m_guest.exram_size = memory.GetExRamSizeReal();
+  m_l1_cache = memory.GetL1Cache();
+  m_l1_cache_size = memory.GetL1CacheSize();
 
 
   // GANE7U enhancements: 60 FPS + 16:9

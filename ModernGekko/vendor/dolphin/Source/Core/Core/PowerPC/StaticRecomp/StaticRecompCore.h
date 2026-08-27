@@ -158,6 +158,10 @@ private:
   bool m_host_call_passthrough = false;
   std::unique_ptr<JitBase> m_fallback_jit;
 
+  // Stable locked-L1 backing storage cached for hot external PSQ accesses.
+  u8* m_l1_cache = nullptr;
+  u32 m_l1_cache_size = 0;
+
   u64 m_native_dispatches = 0;
   u64 m_fallback_steps = 0;
   u64 m_smc_interpreter_steps = 0;

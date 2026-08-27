@@ -29,10 +29,35 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
 u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
-  ea = core->TranslateRelAddress(ea);
+  if (!core->m_active_rel_sections.empty())
+    ea = core->TranslateRelAddress(ea);
   if (ea == 0)
     std::fprintf(stderr, "[zero-access] read size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
                  cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
+
+  if (!core->m_lockstep_verifier->m_ls_journaling && (ea >> 28) == 0xEu)
+  {
+    const u32 offset = ea - LOCKED_CACHE_BASE;
+    if (core->m_l1_cache && size != 0 && size <= core->m_l1_cache_size &&
+        offset <= core->m_l1_cache_size - size)
+    {
+      const u8* const p = core->m_l1_cache + offset;
+      switch (size)
+      {
+      case 1: return p[0];
+      case 2: return (static_cast<u64>(p[0]) << 8) | p[1];
+      case 4:
+        return (static_cast<u64>(p[0]) << 24) | (static_cast<u64>(p[1]) << 16) |
+               (static_cast<u64>(p[2]) << 8) | p[3];
+      case 8:
+        return (static_cast<u64>(p[0]) << 56) | (static_cast<u64>(p[1]) << 48) |
+               (static_cast<u64>(p[2]) << 40) | (static_cast<u64>(p[3]) << 32) |
+               (static_cast<u64>(p[4]) << 24) | (static_cast<u64>(p[5]) << 16) |
+               (static_cast<u64>(p[6]) << 8) | p[7];
+      default: break;
+      }
+    }
+  }
   core->PropagateGuestMSR();
   auto& mmu = core->m_system.GetMMU();
   u64 value;
@@ -71,16 +96,9 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
-  ea = core->TranslateRelAddress(ea);
-  if (ea == 0)
-    std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
-                 cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
 
-  // Gather-pipe fast path: stores to the write-gather pipe page at effective
-  // 0xCC008000 go straight to GPFifo, mirroring the MMU's masked-write
-  // special case without an MMU round trip. Keying on the effective page is
-  // the same shortcut Dolphin's JITs take (optimizeGatherPipe). GPFifo
-  // maintains ppc_state.gather_pipe_ptr internally.
+  // The write-gather page is never a REL target. Handle it before any address
+  // translation/MMU work and use the static-recomp-specific FIFO writers.
   if ((ea & 0xFFFFF000) == 0xCC008000u)
   {
     if (core->m_lockstep_verifier->m_ls_journaling)
@@ -88,25 +106,50 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
     auto& gpfifo = core->m_system.GetGPFifo();
     switch (size)
     {
-    case 1:
-      gpfifo.Write8(static_cast<u8>(value));
-      return;
-    case 2:
-      gpfifo.Write16(static_cast<u16>(value));
-      return;
-    case 4:
-      gpfifo.Write32(static_cast<u32>(value));
-      return;
+    case 1: gpfifo.StaticRecompWrite8(static_cast<u8>(value)); return;
+    case 2: gpfifo.StaticRecompWrite16(static_cast<u16>(value)); return;
+    case 4: gpfifo.StaticRecompWrite32(static_cast<u32>(value)); return;
+    case 8: gpfifo.StaticRecompWrite64(value); return;
     default:
       for (u32 i = size * 8u; i > 0;)
       {
         i -= 8;
-        gpfifo.Write8(static_cast<u8>(value >> i));
+        gpfifo.StaticRecompWrite8(static_cast<u8>(value >> i));
       }
       return;
     }
   }
 
+  if (!core->m_active_rel_sections.empty())
+    ea = core->TranslateRelAddress(ea);
+  if (ea == 0)
+    std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
+                 cpu->pc, core->m_system.GetPPCState().pc, cpu->lr);
+
+  if (!core->m_lockstep_verifier->m_ls_journaling && (ea >> 28) == 0xEu)
+  {
+    const u32 offset = ea - LOCKED_CACHE_BASE;
+    if (core->m_l1_cache && size != 0 && size <= core->m_l1_cache_size &&
+        offset <= core->m_l1_cache_size - size)
+    {
+      u8* const p = core->m_l1_cache + offset;
+      switch (size)
+      {
+      case 1: p[0] = static_cast<u8>(value); return;
+      case 2:
+        p[0] = static_cast<u8>(value >> 8); p[1] = static_cast<u8>(value); return;
+      case 4:
+        p[0] = static_cast<u8>(value >> 24); p[1] = static_cast<u8>(value >> 16);
+        p[2] = static_cast<u8>(value >> 8); p[3] = static_cast<u8>(value); return;
+      case 8:
+        p[0] = static_cast<u8>(value >> 56); p[1] = static_cast<u8>(value >> 48);
+        p[2] = static_cast<u8>(value >> 40); p[3] = static_cast<u8>(value >> 32);
+        p[4] = static_cast<u8>(value >> 24); p[5] = static_cast<u8>(value >> 16);
+        p[6] = static_cast<u8>(value >> 8); p[7] = static_cast<u8>(value); return;
+      default: break;
+      }
+    }
+  }
   core->PropagateGuestMSR();
   auto& mmu = core->m_system.GetMMU();
   if (core->m_lockstep_verifier->m_ls_journaling &&
@@ -170,11 +213,11 @@ void StaticRecompCore::HookExternalWrite32(CPUState* cpu, u32 ea, u32 value, u8 
 void* StaticRecompCore::HookExternalPointer(CPUState* cpu, u32 ea, u32 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
-  auto& memory = core->m_system.GetMemory();
-  if (ea >= LOCKED_CACHE_BASE && size != 0 &&
-      (ea - LOCKED_CACHE_BASE) + size <= memory.GetL1CacheSize())
+  if (ea >= LOCKED_CACHE_BASE && size != 0 && core->m_l1_cache &&
+      size <= core->m_l1_cache_size &&
+      (ea - LOCKED_CACHE_BASE) <= core->m_l1_cache_size - size)
   {
-    return memory.GetL1Cache() + (ea - LOCKED_CACHE_BASE);
+    return core->m_l1_cache + (ea - LOCKED_CACHE_BASE);
   }
   // Everything else stays on the per-access MMU hooks: this hook receives
   // *effective* addresses, and whether one maps to RAM depends on live

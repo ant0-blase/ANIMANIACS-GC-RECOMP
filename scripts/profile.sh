@@ -33,7 +33,7 @@ sudo perf report -i "$OUT/perf.data" --stdio --no-children -g none \
   --sort=dso,symbol --percent-limit 0.1 > "$OUT/hotspots.txt"
 
 sudo perf report -i "$OUT/perf.data" --stdio --no-children -g none \
-  --sort=pid,tid,comm,dso,symbol --percent-limit 0.25 > "$OUT/threads.txt"
+  --sort=pid,comm,dso,symbol --percent-limit 0.25 > "$OUT/threads.txt"
 
 grep -E 'StaticRecompCore::Run|ChunkIndexOf|SingleStepInner|IsForcedFallbackAddress|FastDispatchableAt|DispatchableAt|ResolveNativeAddress|SyncIn|SyncOut|HookExternalWrite' \
   "$OUT/hotspots.txt" > "$OUT/staticrecomp.txt" || true

@@ -278,13 +278,32 @@ void StaticRecompCore::Run()
         // from fallback telemetry. Non-module code retains the configured JIT
         // fallback policy.
         const bool smc_failed_module_pc = m_module_active && IsFailedModuleAddress(ppc.pc);
-        if (m_module_active &&
-            (smc_failed_module_pc || IsForcedFallbackAddress(ppc.pc)))
+        const bool forced_fallback_pc = m_module_active && IsForcedFallbackAddress(ppc.pc);
+
+        // A real SMC/hash mismatch must stay on Dolphin's interpreter so every
+        // instruction fetch observes the modified guest code exactly.
+        if (smc_failed_module_pc)
         {
           ppc.downcount -= interpreter.SingleStepInner();
           ++m_fallback_steps;
-          if (smc_failed_module_pc)
-            ++m_smc_interpreter_steps;
+          ++m_smc_interpreter_steps;
+        }
+        // Forced compatibility ranges are static DOL code, not failed SMC.
+        // Run them through Dolphin's fallback JIT instead of SingleStepInner.
+        // The fallback JIT is configured with SetStaticRecompFallback(true):
+        // its dispatcher calls StaticRecompShouldYieldAt() before each block,
+        // so it returns here as soon as execution reaches native recomp code or
+        // a host-call address. This preserves the compatibility range while
+        // removing instruction fetch/decode/opinfo overhead from every step.
+        else if (forced_fallback_pc && m_fallback_jit)
+        {
+          m_fallback_jit->Run();
+        }
+        else if (forced_fallback_pc)
+        {
+          // Non-x86/non-arm builds may not provide a fallback JIT.
+          ppc.downcount -= interpreter.SingleStepInner();
+          ++m_fallback_steps;
         }
         else if (m_fallback_jit)
         {

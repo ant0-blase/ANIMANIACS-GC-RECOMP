@@ -107,6 +107,25 @@ static u32 chassis_dispatch_burst(
 
     u32 blocks = 0u;
     u64 total_cycles = 0u;
+    /*
+     * GameCube/Wii timebase ratio is 12 CPU cycles per TB tick.
+     *
+     * timebase_ratio is part of the generic ABI, so the old loop divided by a
+     * runtime value after every chained chunk. On x86-64 that can become an
+     * integer DIV in one of the hottest functions in the port.
+     *
+     * Special-case the normal ratio and maintain quotient/remainder
+     * incrementally. This is bit-for-bit equivalent to:
+     *   (timebase_cycles_before + total_cycles) / 12
+     */
+    const int timebase_mode = timebase_ratio == 12u ? 1 : (timebase_ratio != 0u ? 2 : 0);
+    u64 timebase_value = timebase_origin;
+    u64 timebase_remainder = 0u;
+    if (timebase_mode == 1)
+    {
+        timebase_value += timebase_cycles_before / 12u;
+        timebase_remainder = timebase_cycles_before % 12u;
+    }
 
     ctx->pc = address;
 
@@ -190,7 +209,15 @@ static u32 chassis_dispatch_burst(
          * Generated guest code may read the emulated timebase. Keep it moving
          * between chained chunks exactly like the previous C++ dispatch loop.
          */
-        if (timebase_ratio != 0u)
+        if (timebase_mode == 1)
+        {
+            timebase_remainder += charge;
+            const u64 ticks = timebase_remainder / 12u;
+            timebase_remainder -= ticks * 12u;
+            timebase_value += ticks;
+            ctx->timebase = timebase_value;
+        }
+        else if (timebase_mode == 2)
         {
             ctx->timebase =
                 timebase_origin +

@@ -216,6 +216,33 @@ if [[ ! -d "$RUNTIME_BUILD/Sys" ]]; then
   exit 1
 fi
 
+# moderngekko-port regenerates the C chunks from scratch, so game-specific
+# profile-guided generated-code fixes must be reapplied after every module
+# generation. Keep this outside DolRecomp itself: the optimization is tied to
+# the known GANE7U polling loop, not a generic PPC transformation.
+if [[ "$BACKEND" == "c" ]]; then
+  ARTIFACT_DIR="$(dirname -- "$BUILT_MODULE")"
+  MODULE_BUILD_DIR="$ARTIFACT_DIR/module-build"
+
+  echo "==> Applying Animaniacs generated-code optimizations"
+  "$ROOT/scripts/apply-generated-optimizations.py" "$ARTIFACT_DIR"
+
+  [[ -f "$MODULE_BUILD_DIR/build.ninja" ]] || {
+    echo "error: generated module build directory is missing: $MODULE_BUILD_DIR" >&2
+    exit 1
+  }
+
+  echo "==> Rebuilding optimized Animaniacs module"
+  cmake --build "$MODULE_BUILD_DIR" --parallel "$JOBS"
+
+  REBUILT_MODULE="$MODULE_BUILD_DIR/g${GAME_ID}_recomp.so"
+  [[ -s "$REBUILT_MODULE" ]] || {
+    echo "error: optimized module rebuild did not produce $REBUILT_MODULE" >&2
+    exit 1
+  }
+  BUILT_MODULE="$(realpath -e -- "$REBUILT_MODULE")"
+fi
+
 STAGE="$(mktemp -d "$BUILD_ROOT/.publish.XXXXXX")"
 mkdir -p "$STAGE/new-runtime/Sys" "$STAGE/new-module"
 install -m 0755 "$RUNTIME_BUILD/moderngekko-run" "$STAGE/new-runtime/moderngekko-run"

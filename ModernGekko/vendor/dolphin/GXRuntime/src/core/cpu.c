@@ -22,12 +22,14 @@
  * NULL and zero-cost unless installed; the chassis resolves the setter by name
  * via dlsym, so its absence simply disables lockstep. `offset` is the RAM byte
  * offset (into cpu->ram) about to be written, `size` the width in bytes. */
+#if defined(GXRUNTIME_ENABLE_MEM_JOURNAL)
 PPCMemWriteJournal g_mem_write_journal = NULL;
 void* g_mem_write_journal_user = NULL;
 __attribute__((visibility("default"))) void ppc_set_mem_write_journal(PPCMemWriteJournal fn, void* user) {
     g_mem_write_journal = fn;
     g_mem_write_journal_user = user;
 }
+#endif
 
 bool cpu_init(CPUState* cpu) {
     memset(cpu, 0, sizeof(*cpu));
@@ -188,10 +190,17 @@ static GXRUNTIME_ALWAYS_INLINE u32 psq_type_size(u8 type) {
  *  - Quantization: round the lane to f32 first, multiply by the f32
  *    power-of-two scale, clamp in f32, truncate. NaN quantizes to 0
  *    (matching SType(NaN-after-clamp) in release Dolphin on arm64). */
+static GXRUNTIME_ALWAYS_INLINE f32 psq_pow2(s32 scale) {
+    const u32 bits = (u32)(scale + 127) << 23;
+    f32 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 static GXRUNTIME_ALWAYS_INLINE f64 psq_dequant(f64 value, s32 scale) {
     if (scale == 0)
         return (f64)(f32)value;
-    return (f64)(f32)ldexp(value, -scale);
+    return (f64)((f32)value * psq_pow2(-scale));
 }
 
 static GXRUNTIME_ALWAYS_INLINE f64 psq_load_value(CPUState* cpu, u32 ea, u8 type, s32 scale) {
@@ -212,7 +221,7 @@ static GXRUNTIME_ALWAYS_INLINE f64 psq_load_value(CPUState* cpu, u32 ea, u8 type
 }
 
 static GXRUNTIME_ALWAYS_INLINE s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale) {
-    f32 conv = (f32)value * ldexpf(1.0f, scale);
+    f32 conv = (f32)value * psq_pow2(scale);
     if (isnan(conv))
         return 0;
     if (conv <= (f32)min_value)

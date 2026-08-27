@@ -11,7 +11,7 @@ USER_DIR="$ROOT/user"
 # Keep this as small as possible: every address in this interval runs through
 # Dolphin's interpreter instead of the native static-recompiled module.
 
-export STATICRECOMP_FALLBACK_RANGES="${STATICRECOMP_FALLBACK_RANGES:-8016C620-80172D5C}"
+export STATICRECOMP_FALLBACK_RANGES="${STATICRECOMP_FALLBACK_RANGES:-8016C620-80179498}"
 
 # CPU optimization: amortize native module <-> C++ runtime transitions by
 # chaining verified static-recomp chunks inside one native burst. Set to 0 to

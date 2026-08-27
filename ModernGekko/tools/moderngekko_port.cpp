@@ -163,6 +163,25 @@ std::string RawEnvironment(const char* name)
   return value ? "set:" + std::string(value) : "unset";
 }
 
+std::string EnvOr(const char* name, std::string default_value)
+{
+  const char* value = std::getenv(name);
+  return (value && value[0]) ? std::string(value) : default_value;
+}
+
+bool EnvFlag(const char* name, bool default_value)
+{
+  const char* value = std::getenv(name);
+  if (!value || !value[0])
+    return default_value;
+  const std::string_view text(value);
+  if (text == "1" || text == "ON" || text == "on" || text == "true")
+    return true;
+  if (text == "0" || text == "OFF" || text == "off" || text == "false")
+    return false;
+  return default_value;
+}
+
 unsigned EffectiveChunkSize(const char* name, unsigned default_value)
 {
   const char* value = std::getenv(name);
@@ -171,7 +190,7 @@ unsigned EffectiveChunkSize(const char* name, unsigned default_value)
   char* end = nullptr;
   errno = 0;
   const unsigned long parsed = std::strtoul(value, &end, 10);
-  if (errno || !end || *end || parsed < 128 || parsed > 4096)
+  if (errno || !end || *end || parsed < 128 || parsed > 32768)
     return default_value;
   return static_cast<unsigned>(parsed);
 }
@@ -1099,22 +1118,41 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   identity.Add("python_path", python_path);
   identity.Add("python_binary_sha256", *python_hash);
   identity.Add("python_identity", python_identity);
+  const std::string module_march =
+      EnvOr("MODERNGEKKO_MODULE_MARCH", "none");
+  const bool module_mem1_only =
+      EnvFlag("MODERNGEKKO_MODULE_MEM1_ONLY", false);
+  const bool module_mem_journal =
+      EnvFlag("MODERNGEKKO_MODULE_MEM_JOURNAL", false);
+  const bool module_stack_protector =
+      EnvFlag("MODERNGEKKO_MODULE_STACK_PROTECTOR", false);
+
   identity.Add("module_build_type", std::string(MODULE_BUILD_TYPE));
   identity.Add("module_opt_level", module_opt_level);
+  identity.Add("module_march", module_march);
+  identity.Add("module_mem1_only", module_mem1_only ? "on" : "off");
+  identity.Add("module_mem_journal", module_mem_journal ? "on" : "off");
+  identity.Add("module_stack_protector", module_stack_protector ? "on" : "off");
   // Apply ThinLTO explicitly instead of relying on the template's conditional
   // CheckIPOSupported result, so the successful build mode is part of the key.
   const std::string module_cmake_ipo = "OFF";
   const std::string module_effective_ipo = compiler == "clang" ? "thin-explicit" : "off";
   identity.Add("module_ipo_cmake_option", module_cmake_ipo);
   identity.Add("module_ipo_effective", module_effective_ipo);
+  const std::string module_march_flag =
+      module_march == "none" ? std::string() : " -march=" + module_march;
+  const std::string module_ssp_flag =
+      module_stack_protector ? std::string() : " -fno-stack-protector";
+  const std::string module_extra_flags = module_march_flag + module_ssp_flag;
   const std::string module_release_c_flags = compiler == "cl" ? "/DNDEBUG" :
-      compiler == "clang" ? "-DNDEBUG -flto=thin" : "-DNDEBUG";
+      compiler == "clang" ? "-DNDEBUG -flto=thin" + module_extra_flags :
+      "-DNDEBUG" + module_extra_flags;
   const bool clang_msvc_target =
       compiler == "clang" && compiler_target.find("msvc") != std::string::npos;
   const std::string module_release_link_flags = compiler == "cl" ? "/INCREMENTAL:NO" :
       clang_msvc_target ? "-O" + module_opt_level + " -flto=thin -fuse-ld=lld" :
-      compiler == "clang" ? "-O" + module_opt_level + " -flto=thin" :
-      "-O" + module_opt_level;
+      compiler == "clang" ? "-O" + module_opt_level + " -flto=thin" + module_march_flag :
+      "-O" + module_opt_level + module_march_flag;
   identity.Add("module_base_c_flags", "");
   identity.Add("module_release_c_flags", module_release_c_flags);
   identity.Add("module_base_shared_linker_flags", "");
@@ -1143,6 +1181,21 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   identity.Add("env.MODERNGEKKO_MODULE_OPT_LEVEL.raw",
                RawEnvironment("MODERNGEKKO_MODULE_OPT_LEVEL"));
   identity.Add("env.MODERNGEKKO_MODULE_OPT_LEVEL.effective", module_opt_level);
+  identity.Add("env.MODERNGEKKO_MODULE_MARCH.raw",
+               RawEnvironment("MODERNGEKKO_MODULE_MARCH"));
+  identity.Add("env.MODERNGEKKO_MODULE_MARCH.effective", module_march);
+  identity.Add("env.MODERNGEKKO_MODULE_MEM1_ONLY.raw",
+               RawEnvironment("MODERNGEKKO_MODULE_MEM1_ONLY"));
+  identity.Add("env.MODERNGEKKO_MODULE_MEM1_ONLY.effective",
+               module_mem1_only ? "on" : "off");
+  identity.Add("env.MODERNGEKKO_MODULE_MEM_JOURNAL.raw",
+               RawEnvironment("MODERNGEKKO_MODULE_MEM_JOURNAL"));
+  identity.Add("env.MODERNGEKKO_MODULE_MEM_JOURNAL.effective",
+               module_mem_journal ? "on" : "off");
+  identity.Add("env.MODERNGEKKO_MODULE_STACK_PROTECTOR.raw",
+               RawEnvironment("MODERNGEKKO_MODULE_STACK_PROTECTOR"));
+  identity.Add("env.MODERNGEKKO_MODULE_STACK_PROTECTOR.effective",
+               module_stack_protector ? "on" : "off");
   identity.Add("env.DOLRECOMP_LLVM_BUILD_MODE.raw",
                RawEnvironment("DOLRECOMP_LLVM_BUILD_MODE"));
   identity.Add("env.DOLRECOMP_LLVM_BUILD_MODE.effective", EffectiveLLVMBuildMode());
@@ -1276,7 +1329,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
              << "module_sha256=" << *staged_hash << '\n';
     const fs::path cmake_cache = module_build / "CMakeCache.txt";
     for (const auto& [manifest_name, cache_name] :
-         std::array<std::pair<std::string_view, std::string_view>, 11>{
+         std::array<std::pair<std::string_view, std::string_view>, 13>{
              {{"cmake_actual_c_compiler", "CMAKE_C_COMPILER"},
               {"cmake_detected_linker", "CMAKE_LINKER"},
               {"cmake_actual_ninja", "CMAKE_MAKE_PROGRAM"},
@@ -1288,7 +1341,9 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
                "CMAKE_SHARED_LINKER_FLAGS_RELEASE"},
               {"cmake_actual_build_type", "CMAKE_BUILD_TYPE"},
               {"cmake_actual_module_opt", "RECOMPCORE_MODULE_OPT_LEVEL"},
-              {"cmake_actual_module_ipo", "RECOMPCORE_MODULE_ENABLE_IPO"}}})
+              {"cmake_actual_module_ipo", "RECOMPCORE_MODULE_ENABLE_IPO"},
+              {"cmake_actual_module_mem1", "RECOMPCORE_MODULE_GAMECUBE_MEM1_ONLY"},
+              {"cmake_actual_module_journal", "RECOMPCORE_MODULE_ENABLE_MEM_JOURNAL"}}})
     {
       if (const auto value = CMakeCacheValue(cmake_cache, cache_name))
         manifest << manifest_name << '=' << ManifestEscape(*value) << '\n';
@@ -1403,6 +1458,10 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       Quote(module_release_link_flags) +
       " -DRECOMPCORE_MODULE_OPT_LEVEL=" + module_opt_level +
       " -DRECOMPCORE_MODULE_ENABLE_IPO=" + module_cmake_ipo +
+      " -DRECOMPCORE_MODULE_GAMECUBE_MEM1_ONLY=" +
+      std::string(module_mem1_only ? "ON" : "OFF") +
+      " -DRECOMPCORE_MODULE_ENABLE_MEM_JOURNAL=" +
+      std::string(module_mem_journal ? "ON" : "OFF") +
       " -DGAME_ID=" + game.disc_id +
       " -DGENERATED_DIR=" + Quote(generated) +
       " -DGXRUNTIME_DIR=" + Quote(gxruntime) +
@@ -1424,7 +1483,11 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       CMakeCacheValue(cmake_cache, "CMAKE_SHARED_LINKER_FLAGS_RELEASE") !=
           module_release_link_flags ||
       CMakeCacheValue(cmake_cache, "RECOMPCORE_MODULE_OPT_LEVEL") != module_opt_level ||
-      CMakeCacheValue(cmake_cache, "RECOMPCORE_MODULE_ENABLE_IPO") != module_cmake_ipo)
+      CMakeCacheValue(cmake_cache, "RECOMPCORE_MODULE_ENABLE_IPO") != module_cmake_ipo ||
+      CMakeCacheValue(cmake_cache, "RECOMPCORE_MODULE_GAMECUBE_MEM1_ONLY") !=
+          (module_mem1_only ? "ON" : "OFF") ||
+      CMakeCacheValue(cmake_cache, "RECOMPCORE_MODULE_ENABLE_MEM_JOURNAL") !=
+          (module_mem_journal ? "ON" : "OFF"))
   {
     std::cerr << "module CMake configuration does not match its cache identity\n";
     return std::nullopt;

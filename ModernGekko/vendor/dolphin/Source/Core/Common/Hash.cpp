@@ -322,29 +322,66 @@ FUNCTION_TARGET_SSE42
 static u64 GetHash64_SSE42_CRC32(const u8* src, u32 len, u32 samples)
 {
   u64 h[4] = {len, 0, 0, 0};
-  u32 Step = (len / 8);
-  const u64* data = (const u64*)src;
-  const u64* end = data + Step;
-  if (samples == 0)
-    samples = std::max(Step, 1u);
-  Step = Step / samples;
-  if (Step < 1)
-    Step = 1;
+  const u32 words = len / 8;
+  const u64* const begin = reinterpret_cast<const u64*>(src);
+  const u64* const end = begin + words;
+  u32 step;
 
-  while (data < end - Step * 3)
+  if (samples == 0 || samples >= words) [[likely]]
+    step = 1;
+  else
+    step = words / samples;
+
+  if (step == 1)
   {
-    h[0] = _mm_crc32_u64(h[0], data[Step * 0]);
-    h[1] = _mm_crc32_u64(h[1], data[Step * 1]);
-    h[2] = _mm_crc32_u64(h[2], data[Step * 2]);
-    h[3] = _mm_crc32_u64(h[3], data[Step * 3]);
-    data += Step * 4;
+    const u64* data = begin;
+    while (static_cast<size_t>(end - data) >= 8)
+    {
+      h[0] = _mm_crc32_u64(h[0], data[0]);
+      h[1] = _mm_crc32_u64(h[1], data[1]);
+      h[2] = _mm_crc32_u64(h[2], data[2]);
+      h[3] = _mm_crc32_u64(h[3], data[3]);
+      h[0] = _mm_crc32_u64(h[0], data[4]);
+      h[1] = _mm_crc32_u64(h[1], data[5]);
+      h[2] = _mm_crc32_u64(h[2], data[6]);
+      h[3] = _mm_crc32_u64(h[3], data[7]);
+      data += 8;
+    }
+    if (static_cast<size_t>(end - data) >= 4)
+    {
+      h[0] = _mm_crc32_u64(h[0], data[0]);
+      h[1] = _mm_crc32_u64(h[1], data[1]);
+      h[2] = _mm_crc32_u64(h[2], data[2]);
+      h[3] = _mm_crc32_u64(h[3], data[3]);
+      data += 4;
+    }
+    if (data < end)
+      h[0] = _mm_crc32_u64(h[0], data[0]);
+    if (static_cast<size_t>(end - data) >= 2)
+      h[1] = _mm_crc32_u64(h[1], data[1]);
+    if (static_cast<size_t>(end - data) >= 3)
+      h[2] = _mm_crc32_u64(h[2], data[2]);
   }
-  if (data < end - Step * 0)
-    h[0] = _mm_crc32_u64(h[0], data[Step * 0]);
-  if (data < end - Step * 1)
-    h[1] = _mm_crc32_u64(h[1], data[Step * 1]);
-  if (data < end - Step * 2)
-    h[2] = _mm_crc32_u64(h[2], data[Step * 2]);
+  else
+  {
+    size_t index = 0;
+    const size_t stride = step;
+    const size_t word_count = words;
+    while (index + stride * 3 < word_count)
+    {
+      h[0] = _mm_crc32_u64(h[0], begin[index]);
+      h[1] = _mm_crc32_u64(h[1], begin[index + stride]);
+      h[2] = _mm_crc32_u64(h[2], begin[index + stride * 2]);
+      h[3] = _mm_crc32_u64(h[3], begin[index + stride * 3]);
+      index += stride * 4;
+    }
+    if (index < word_count)
+      h[0] = _mm_crc32_u64(h[0], begin[index]);
+    if (index + stride < word_count)
+      h[1] = _mm_crc32_u64(h[1], begin[index + stride]);
+    if (index + stride * 2 < word_count)
+      h[2] = _mm_crc32_u64(h[2], begin[index + stride * 2]);
+  }
 
   if (len & 7)
   {
@@ -353,7 +390,6 @@ static u64 GetHash64_SSE42_CRC32(const u8* src, u32 len, u32 samples)
     h[0] = _mm_crc32_u64(h[0], temp);
   }
 
-  // FIXME: is there a better way to combine these partial hashes?
   return h[0] + (h[1] << 10) + (h[2] << 21) + (h[3] << 32);
 }
 
@@ -422,7 +458,11 @@ static u64 SetHash64Function(const u8* src, u32 len, u32 samples)
 
 u64 GetHash64(const u8* src, u32 len, u32 samples)
 {
+#if defined(_M_X86_64) && defined(__SSE4_2__)
+  return GetHash64_SSE42_CRC32(src, len, samples);
+#else
   return s_texture_hash_func(src, len, samples);
+#endif
 }
 
 u32 StartCRC32()

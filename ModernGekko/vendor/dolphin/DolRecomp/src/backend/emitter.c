@@ -242,10 +242,23 @@ static void emit_psq_load(FILE* out, const PPCInst* inst, bool indexed,
         emit_dform_ea(out, inst->rA, inst->simm, update);
     }
     fprintf(out, ";\n");
-    fprintf(out, "        ppc_psq_load(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
+    fprintf(out, "        const u32 psq_gqr = ctx->gqr[%uu];\n", inst->i & 7u);
+    if (indexed) {
+        fprintf(out, "        if (DOLRECOMP_LIKELY(((psq_gqr >> 16) & 7u) == 0u)) {\n");
+    } else {
+        fprintf(out, "        if (DOLRECOMP_LIKELY((ctx->hid2 & PPC_HID2_LSQE) != 0u && ((psq_gqr >> 16) & 7u) == 0u)) {\n");
+    }
+    fprintf(out, "            ctx->fpr[%u] = f64_value(convert_to_double(mem_read32(ctx, ea)));\n", inst->rD);
+    if (inst->w)
+        fprintf(out, "            ctx->ps1[%u] = 1.0;\n", inst->rD);
+    else
+        fprintf(out, "            ctx->ps1[%u] = f64_value(convert_to_double(mem_read32(ctx, ea + 4u)));\n", inst->rD);
+    fprintf(out, "        } else {\n");
+    fprintf(out, "            ppc_psq_load(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
             inst->rD, inst->w ? "true" : "false", inst->i,
             indexed ? "true" : "false", inst->address);
-    fprintf(out, "        if (ctx->exception) return;\n");
+    fprintf(out, "        }\n");
+    fprintf(out, "        if (DOLRECOMP_UNLIKELY(ctx->exception)) return;\n");
     if (update) {
         fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
     }
@@ -262,10 +275,21 @@ static void emit_psq_store(FILE* out, const PPCInst* inst, bool indexed,
         emit_dform_ea(out, inst->rA, inst->simm, update);
     }
     fprintf(out, ";\n");
-    fprintf(out, "        ppc_psq_store(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
+    fprintf(out, "        const u32 psq_gqr = ctx->gqr[%uu];\n", inst->i & 7u);
+    if (indexed) {
+        fprintf(out, "        if (DOLRECOMP_LIKELY((psq_gqr & 7u) == 0u)) {\n");
+    } else {
+        fprintf(out, "        if (DOLRECOMP_LIKELY((ctx->hid2 & PPC_HID2_LSQE) != 0u && (psq_gqr & 7u) == 0u)) {\n");
+    }
+    fprintf(out, "            mem_write32(ctx, ea, convert_to_single_ftz(f64_bits(ctx->fpr[%u])));\n", inst->rS);
+    if (!inst->w)
+        fprintf(out, "            mem_write32(ctx, ea + 4u, convert_to_single_ftz(f64_bits(ctx->ps1[%u])));\n", inst->rS);
+    fprintf(out, "        } else {\n");
+    fprintf(out, "            ppc_psq_store(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
             inst->rS, inst->w ? "true" : "false", inst->i,
             indexed ? "true" : "false", inst->address);
-    fprintf(out, "        if (ctx->exception) return;\n");
+    fprintf(out, "        }\n");
+    fprintf(out, "        if (DOLRECOMP_UNLIKELY(ctx->exception)) return;\n");
     if (update) {
         fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
     }
@@ -315,7 +339,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
         if (local_target) {
             if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
+                fprintf(out, "            if (DOLRECOMP_UNLIKELY(ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)) {\n");
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
@@ -329,7 +353,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
+            fprintf(out, "            if (DOLRECOMP_UNLIKELY(ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)) {\n");
             fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "                return;\n");
             fprintf(out, "            }\n");
@@ -426,6 +450,14 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "\n"
         "#ifndef DOLRECOMP_C_LOOP_CYCLE_BUDGET\n"
         "#define DOLRECOMP_C_LOOP_CYCLE_BUDGET 256\n"
+        "#endif\n"
+        "\n"
+        "#if defined(__GNUC__) || defined(__clang__)\n"
+        "#define DOLRECOMP_LIKELY(x)   __builtin_expect(!!(x), 1)\n"
+        "#define DOLRECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)\n"
+        "#else\n"
+        "#define DOLRECOMP_LIKELY(x)   (x)\n"
+        "#define DOLRECOMP_UNLIKELY(x) (x)\n"
         "#endif\n"
         "\n"
         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
@@ -1845,6 +1877,11 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     }
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    fprintf(out, "#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER) && !defined(DOLRECOMP_DISABLE_PINNED_CTX)\n");
+    fprintf(out, "    register CPUState* dolrecomp_ctx_r15 __asm__(\"r15\") = ctx;\n");
+    fprintf(out, "    __asm__ volatile(\"\" : \"+r\"(dolrecomp_ctx_r15));\n");
+    fprintf(out, "#define ctx dolrecomp_ctx_r15\n");
+    fprintf(out, "#endif\n");
     fprintf(out, "    switch (ctx->pc) {\n");
     for (u32 i = 0; i < count; i++) {
         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
@@ -1879,7 +1916,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     if (has_local_returns) {
         fprintf(out, "    return;\n");
         fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        fprintf(out, "    if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) return;\n");
+        fprintf(out, "    if (DOLRECOMP_UNLIKELY(ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)) return;\n");
         fprintf(out, "    switch (ctx->pc) {\n");
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {
@@ -1890,6 +1927,9 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         fprintf(out, "    default: return;\n");
         fprintf(out, "    }\n");
     }
+    fprintf(out, "#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER) && !defined(DOLRECOMP_DISABLE_PINNED_CTX)\n");
+    fprintf(out, "#undef ctx\n");
+    fprintf(out, "#endif\n");
     fprintf(out, "}\n\n");
     c_function_cfg_destroy(&cfg);
     return true;

@@ -169,8 +169,29 @@ struct CPUState {
 #include <stdio.h>
 
 typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);
+#if defined(GXRUNTIME_ENABLE_MEM_JOURNAL)
 extern PPCMemWriteJournal g_mem_write_journal;
 extern void* g_mem_write_journal_user;
+#define GXRUNTIME_JOURNAL_WRITE(off, sz)                                      \
+    do {                                                                      \
+        if (g_mem_write_journal && (off) != (u32)-1)                          \
+            g_mem_write_journal((off), (sz), g_mem_write_journal_user);       \
+    } while (0)
+#else
+#define GXRUNTIME_JOURNAL_WRITE(off, sz) ((void)(off))
+#endif
+
+#if defined(__clang__)
+#define GXRUNTIME_ASSUME(cond) __builtin_assume(cond)
+#elif defined(__GNUC__)
+#define GXRUNTIME_ASSUME(cond)                                                \
+    do {                                                                      \
+        if (!(cond))                                                          \
+            __builtin_unreachable();                                          \
+    } while (0)
+#else
+#define GXRUNTIME_ASSUME(cond) ((void)0)
+#endif
 
 static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size, u32* out_offset) {
     const u32 masked_addr = addr & ~0x40000000u;
@@ -190,6 +211,7 @@ static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size
     if (offset <= GC_MAIN_RAM_SIZE - size) {
         if (out_offset)
             *out_offset = offset;
+        GXRUNTIME_ASSUME(cpu->ram != NULL);
         return cpu->ram + offset;
     }
 
@@ -218,12 +240,19 @@ static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size
 #endif
 }
 
+#if defined(GXRUNTIME_STORE_CLEARS_RESERVATION)
 static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u32 addr) {
     u32 reserve_addr = cpu->reserve_addr & ~0x40000000u;
     u32 store_addr = addr & ~0x40000000u;
     if (cpu->reserve_valid && ((reserve_addr ^ store_addr) & ~31u) == 0)
         cpu->reserve_valid = false;
 }
+#else
+static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u32 addr) {
+    (void)cpu;
+    (void)addr;
+}
+#endif
 
 static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
     u8* ptr = get_ram_ptr(cpu, addr, 8, NULL);
@@ -245,7 +274,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 val
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 8, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 8);
     write_be64(ptr, value);
 }
 
@@ -269,7 +298,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 val
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 4, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 4);
     write_be32(ptr, value);
 }
 
@@ -293,7 +322,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 val
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 2, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 2);
     write_be16(ptr, value);
 }
 
@@ -317,7 +346,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 1, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 1);
     *ptr = value;
 }
 

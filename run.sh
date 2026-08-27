@@ -10,7 +10,8 @@ USER_DIR="$ROOT/user"
 # Compatibility range currently required for correct gameplay/camera behavior.
 # Keep this as small as possible: every address in this interval runs through
 # Dolphin's interpreter instead of the native static-recompiled module.
-export STATICRECOMP_FALLBACK_RANGES="${STATICRECOMP_FALLBACK_RANGES:-8016F6B8-80172D5C}"
+
+export STATICRECOMP_FALLBACK_RANGES="${STATICRECOMP_FALLBACK_RANGES:-8016C620-80172D5C}"
 
 # CPU optimization: amortize native module <-> C++ runtime transitions by
 # chaining verified static-recomp chunks inside one native burst. Set to 0 to

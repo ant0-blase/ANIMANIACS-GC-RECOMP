@@ -106,6 +106,8 @@ void SaveAnimaniacsSettings()
   out << "aspect_override=" << AnimaniacsPC::AspectOverride() << '\n';
   out << "fov=" << AnimaniacsPC::FovDegrees() << '\n';
   out << "fps_target=" << AnimaniacsPC::FpsTarget() << '\n';
+  out << "hud_aspect_correction="
+      << (AnimaniacsPC::HudAspectCorrectionEnabled() ? 1 : 0) << '\n';
   out << "internal_resolution=" << Config::Get(Config::GFX_EFB_SCALE) << '\n';
   out << "vsync=" << (Config::Get(Config::GFX_VSYNC) ? 1 : 0) << '\n';
 }
@@ -136,6 +138,8 @@ void LoadAnimaniacsSettingsOnce()
       AnimaniacsPC::SetFovDegrees(std::strtof(value.c_str(), nullptr));
     else if (key == "fps_target")
       AnimaniacsPC::SetFpsTarget(std::atoi(value.c_str()));
+    else if (key == "hud_aspect_correction")
+      AnimaniacsPC::SetHudAspectCorrectionEnabled(std::atoi(value.c_str()) != 0);
     else if (key == "internal_resolution")
       Config::SetCurrent(Config::GFX_EFB_SCALE, std::clamp(std::atoi(value.c_str()), 1, 12));
     else if (key == "vsync")
@@ -244,6 +248,15 @@ void DrawAnimaniacsPcMenu()
 
     ImGui::Text("Detected output aspect: %.3f:1", AnimaniacsPC::HostAspect());
     ImGui::TextDisabled("Auto follows the real Vulkan backbuffer, including fullscreen.");
+
+    bool preserve_hud = AnimaniacsPC::HudAspectCorrectionEnabled();
+    if (ImGui::Checkbox("Preserve HUD / 2D proportions", &preserve_hud))
+    {
+      AnimaniacsPC::SetHudAspectCorrectionEnabled(preserve_hud);
+      changed = true;
+    }
+    ImGui::TextDisabled(
+        "Keeps orthographic HUD/icons round while the 3D world uses the selected aspect.");
 
     ImGui::SeparatorText("Field of view");
 

@@ -148,6 +148,73 @@ void StaticRecompCore::Run()
         write32_be(0x8026B97Cu, std::bit_cast<u32>(y_scale));
       }
     }
+
+    /*
+     * ANIM_PC_V10_TIMING_ASPECT
+     *
+     * 3D:
+     * GANE7U stores half of its horizontal FOV at 0x801C15DC.  The retail
+     * value is 35 degrees (70 degree hFOV) at 4:3.  With no manual FOV override
+     * selected, derive Hor+ hFOV from the chosen aspect while preserving the
+     * original vertical FOV.  16:9 lands at ~86.07 degrees, matching the known
+     * PS2 widescreen correction.
+     *
+     * Timing:
+     * The retail DOL contains exactly six aligned 1/60 second constants used by
+     * frame-driven game/UI systems.  A VI rate above 60 makes those call sites
+     * execute more often.  Scale all six to 1/target so real-time gameplay,
+     * animation and UI rates stay at their 60 Hz behavior while presentation
+     * can run at 90/120/144/165/240 Hz.  CPU, timebase, DSP and AI clocks are
+     * deliberately untouched.
+     */
+    {
+      constexpr float pi = 3.14159265358979323846f;
+      constexpr float native_aspect = 4.0f / 3.0f;
+      constexpr float native_half_hfov_rad = 35.0f * pi / 180.0f;
+
+      const float target_aspect =
+          (aspect_height != 0.0f) ? (aspect_width / aspect_height) : native_aspect;
+      const float requested_hfov = AnimaniacsPC::FovDegrees();
+
+      float hfov = 70.0f;
+      if (requested_hfov > 0.0f)
+      {
+        hfov = std::clamp(requested_hfov, 45.0f, 130.0f);
+      }
+      else if (std::isfinite(target_aspect) && target_aspect > 0.0f)
+      {
+        const float half_hfov =
+            std::atan(std::tan(native_half_hfov_rad) * (target_aspect / native_aspect));
+        hfov = std::clamp(2.0f * half_hfov * 180.0f / pi, 45.0f, 130.0f);
+      }
+
+      const float half_fov_radians = hfov * pi / 360.0f;
+      const float tangent = std::tan(half_fov_radians);
+      if (std::isfinite(tangent) && tangent > 0.00001f &&
+          std::isfinite(target_aspect) && target_aspect > 0.0f)
+      {
+        const float x_scale = 1.0f / tangent;
+        const float y_scale = x_scale * target_aspect;
+        write32_be(0x801C15DCu, std::bit_cast<u32>(half_fov_radians));
+        write32_be(0x8026B978u, std::bit_cast<u32>(x_scale));
+        write32_be(0x8026B97Cu, std::bit_cast<u32>(y_scale));
+      }
+
+      const int fps_target = std::clamp(AnimaniacsPC::FpsTarget(), 60, 360);
+      const float frame_dt = 1.0f / static_cast<float>(fps_target);
+      constexpr u32 FRAME_DT_GLOBALS[] = {
+          0x801C383Cu,
+          0x801C3FF0u,
+          0x801C6F74u,
+          0x801D0010u,
+          0x801D005Cu,
+          0x801D049Cu,
+      };
+      const u32 frame_dt_bits = std::bit_cast<u32>(frame_dt);
+      for (const u32 address : FRAME_DT_GLOBALS)
+        write32_be(address, frame_dt_bits);
+    }
+
   };
 
   apply_gane_enhancements();

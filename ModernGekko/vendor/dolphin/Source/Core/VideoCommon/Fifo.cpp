@@ -228,9 +228,16 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
     m_video_buffer_write_ptr = m_video_buffer + existing_len;
     m_video_buffer_read_ptr = m_video_buffer;
   }
-  // Copy new video instructions to m_video_buffer for future use in rendering the new picture
+  // Copy new video instructions to m_video_buffer for future use in rendering the new picture.
+  // ANIM_FIFO_MEM1_FAST_COPY
+  // CP FIFO pointers are physical; GANE7U keeps the FIFO in MEM1.
   auto& memory = m_system.GetMemory();
-  memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
+  u8* const ram = memory.GetRAM();
+  const u32 ram_size = memory.GetRamSizeReal();
+  if (ram && read_ptr <= ram_size && ram_size - read_ptr >= GPFifo::GATHER_PIPE_SIZE) [[likely]]
+    std::memcpy(m_video_buffer_write_ptr, ram + read_ptr, GPFifo::GATHER_PIPE_SIZE);
+  else
+    memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
   m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
 }
 
@@ -263,8 +270,14 @@ void FifoManager::ReadDataFromFifoOnCPU(u32 read_ptr)
       return;
     }
   }
+  // ANIM_FIFO_MEM1_FAST_COPY_CPU
   auto& memory = m_system.GetMemory();
-  memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
+  u8* const ram = memory.GetRAM();
+  const u32 ram_size = memory.GetRamSizeReal();
+  if (ram && read_ptr <= ram_size && ram_size - read_ptr >= GPFifo::GATHER_PIPE_SIZE) [[likely]]
+    std::memcpy(m_video_buffer_write_ptr, ram + read_ptr, GPFifo::GATHER_PIPE_SIZE);
+  else
+    memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
   m_video_buffer_pp_read_ptr = OpcodeDecoder::RunFifo<true>(
       DataReader(m_video_buffer_pp_read_ptr, write_ptr + GPFifo::GATHER_PIPE_SIZE), nullptr);
   // This would have to be locked if the GPU thread didn't spin.
@@ -313,6 +326,9 @@ void FifoManager::RunGpuLoop()
           auto& fifo = command_processor.GetFifo();
           command_processor.SetCPStatusFromGPU();
 
+          // ANIM_GPU_DID_FIFO_WORK
+          bool did_fifo_work = false;
+
           // check if we are able to run this buffer
           while (!command_processor.IsInterruptWaiting() &&
                  fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
@@ -322,6 +338,7 @@ void FifoManager::RunGpuLoop()
             if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
               break;
 
+            did_fifo_work = true;
             u32 cyclesExecuted = 0;
             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
             ReadDataFromFifo(readPtr);
@@ -379,10 +396,13 @@ void FifoManager::RunGpuLoop()
               m_sync_wakeup_event.Set();
           }
 
-          // The fifo is empty and it's unlikely we will get any more work in the near future.
-          // Make sure VertexManager finishes drawing any primitives it has stored in it's buffer.
-          g_vertex_manager->Flush();
-          g_framebuffer_manager->RefreshPeekCache();
+          // Flush only after a productive wake. If no FIFO bytes were consumed,
+          // the previous productive wake already flushed the pending primitives.
+          if (did_fifo_work) [[likely]]
+          {
+            g_vertex_manager->Flush();
+            g_framebuffer_manager->RefreshPeekCache();
+          }
         }
       },
       100);

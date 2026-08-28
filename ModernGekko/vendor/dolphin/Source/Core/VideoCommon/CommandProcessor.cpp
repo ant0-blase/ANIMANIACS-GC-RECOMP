@@ -52,6 +52,7 @@ void SCPFifoStruct::Init()
   bFF_Breakpoint.store(0, std::memory_order_relaxed);
   bFF_HiWatermark.store(0, std::memory_order_relaxed);
   bFF_HiWatermarkInt.store(0, std::memory_order_relaxed);
+  bFF_StatusInterruptsEnabled.store(0, std::memory_order_relaxed);
   bFF_LoWatermark.store(0, std::memory_order_relaxed);
   bFF_LoWatermarkInt.store(0, std::memory_order_relaxed);
 }
@@ -89,6 +90,14 @@ void CommandProcessorManager::DoState(PointerWrap& p)
   p.Do(m_perf_select);
   p.Do(m_unk_0a_reg);
   m_fifo.DoState(p);
+
+  // ANIM_CP_STATUS_GATE_DOSTATE
+  const bool status_interrupts_enabled =
+      (m_cp_ctrl_reg.BPEnable && m_cp_ctrl_reg.BPInt) ||
+      m_cp_ctrl_reg.FifoOverflowIntEnable ||
+      m_cp_ctrl_reg.FifoUnderflowIntEnable;
+  m_fifo.bFF_StatusInterruptsEnabled.store(status_interrupts_enabled,
+                                           std::memory_order_relaxed);
 
   p.Do(m_interrupt_set);
   p.Do(m_interrupt_waiting);
@@ -389,14 +398,30 @@ void CommandProcessorManager::GatherPipeBursted()
   const u32 old_distance =
       m_fifo.CPReadWriteDistance.fetch_add(GPFifo::GATHER_PIPE_SIZE,
                                            std::memory_order_seq_cst);
+  const u32 new_distance = old_distance + GPFifo::GATHER_PIPE_SIZE;
 
   if (!cp_interrupt_logic_active)
-    hi_watermark = old_distance > m_fifo.CPHiWatermark;
+    hi_watermark = new_distance > m_fifo.CPHiWatermark;
 
   if (hi_watermark) [[unlikely]]
     m_system.GetCoreTiming().ForceExceptionCheck(0);
 
-  m_system.GetFifo().RunGpu();
+  /*
+   * In the normal dual-core path, empty->nonempty is the transition that must
+   * wake the GPU worker. If distance was already non-zero, the previous burst
+   * already made the worker runnable; repeating Wakeup() for every 32-byte
+   * gather only adds host synchronization.
+   *
+   * Preserve RunGpu() for single-core, deterministic and sync-GPU paths
+   * because it also maintains their CoreTiming callback state.
+   */
+  const bool needs_gpu_wakeup =
+      old_distance == 0 || !IsOnThread(m_system) ||
+      m_system.GetFifo().UseDeterministicGPUThread() ||
+      m_system.GetFifo().UseSyncGPU();
+
+  if (needs_gpu_wakeup)
+    m_system.GetFifo().RunGpu();
 
   ASSERT_MSG(COMMANDPROCESSOR,
              m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) <=
@@ -450,17 +475,20 @@ bool CommandProcessorManager::IsInterruptWaiting() const
 
 void CommandProcessorManager::SetCPStatusFromGPU()
 {
+  // ANIM_CP_STATUS_FAST_GATE
+  // This runs at GPU-loop frequency. Normal gameplay has no CP status IRQ enabled.
+  if (!m_fifo.bFF_StatusInterruptsEnabled.load(std::memory_order_relaxed) &&
+      !m_interrupt_set.IsSet() && !m_interrupt_waiting.IsSet()) [[likely]]
+  {
+    return;
+  }
+
+  // Slow path: exact Dolphin status/interrupt behavior.
   const bool breakpoint_enabled = m_fifo.bFF_BPEnable.load(std::memory_order_relaxed) != 0;
   const bool breakpoint_irq_enabled =
       breakpoint_enabled && m_fifo.bFF_BPInt.load(std::memory_order_relaxed) != 0;
   const bool hi_irq_enabled = m_fifo.bFF_HiWatermarkInt.load(std::memory_order_relaxed) != 0;
   const bool lo_irq_enabled = m_fifo.bFF_LoWatermarkInt.load(std::memory_order_relaxed) != 0;
-
-  if (!breakpoint_irq_enabled && !hi_irq_enabled && !lo_irq_enabled &&
-      !m_interrupt_set.IsSet() && !m_interrupt_waiting.IsSet()) [[likely]]
-  {
-    return;
-  }
 
   bool breakpoint = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed);
   if (breakpoint_enabled)
@@ -591,6 +619,14 @@ void CommandProcessorManager::SetCpControlRegister()
   m_fifo.bFF_HiWatermarkInt.store(m_cp_ctrl_reg.FifoOverflowIntEnable, std::memory_order_relaxed);
   m_fifo.bFF_LoWatermarkInt.store(m_cp_ctrl_reg.FifoUnderflowIntEnable, std::memory_order_relaxed);
   m_fifo.bFF_GPLinkEnable.store(m_cp_ctrl_reg.GPLinkEnable, std::memory_order_relaxed);
+
+  // ANIM_CP_STATUS_GATE_CONTROL
+  const bool status_interrupts_enabled =
+      (m_cp_ctrl_reg.BPEnable && m_cp_ctrl_reg.BPInt) ||
+      m_cp_ctrl_reg.FifoOverflowIntEnable ||
+      m_cp_ctrl_reg.FifoUnderflowIntEnable;
+  m_fifo.bFF_StatusInterruptsEnabled.store(status_interrupts_enabled,
+                                           std::memory_order_relaxed);
 
   DEBUG_LOG_FMT(COMMANDPROCESSOR, "\t GPREAD {} | BP {} | Int {} | OvF {} | UndF {} | LINK {}",
                 m_fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) ? "ON" : "OFF",

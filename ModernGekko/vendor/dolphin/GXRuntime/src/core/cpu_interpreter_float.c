@@ -308,16 +308,15 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
     }
 
     /*
-     * Hot finite path. Keep all existing FMA/Force25Bit/tie-correction math
-     * untouched; only bypass special-value handling when all operands and the
-     * result are definitely finite.
+     * ANIMANIACS_FMA_FINITE_V12
+     *
+     * A finite fused result proves that this operation did not hit the PPC
+     * NaN/Inf special cases below. Test the result exponent once instead of
+     * decoding a/b/c/result separately on every FMA.
      */
     const u64 exponent_mask = 0x7FF0000000000000ull;
-    const bool finite =
-        (f64_bits(a) & exponent_mask) != exponent_mask &&
-        (f64_bits(b) & exponent_mask) != exponent_mask &&
-        (f64_bits(c) & exponent_mask) != exponent_mask &&
-        (f64_bits(result) & exponent_mask) != exponent_mask;
+    u64 result_bits = f64_bits(result);
+    const bool finite = (result_bits & exponent_mask) != exponent_mask;
 
 #if defined(__GNUC__) || defined(__clang__)
     if (__builtin_expect(finite, 1))
@@ -325,9 +324,48 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
     if (finite)
 #endif
     {
-        if (negative)
+        if (negative) {
             result = -result;
-        set_fprf(cpu, single ? classify_f32((f32)result) : classify_f64(result));
+            result_bits ^= 0x8000000000000000ull;
+        }
+
+        u32 fprf;
+        if (single) {
+            const f32 single_result = (f32)result;
+            u32 bits32;
+            memcpy(&bits32, &single_result, sizeof(bits32));
+            const u32 sign = bits32 >> 31;
+            const u32 exponent = bits32 & 0x7F800000u;
+            const u32 fraction = bits32 & 0x007FFFFFu;
+
+#if defined(__GNUC__) || defined(__clang__)
+            if (__builtin_expect(exponent != 0u, 1))
+#else
+            if (exponent != 0u)
+#endif
+                fprf = sign ? 0x08u : 0x04u;
+            else if (fraction != 0u)
+                fprf = sign ? 0x18u : 0x14u;
+            else
+                fprf = sign ? 0x12u : 0x02u;
+        } else {
+            const u32 sign = (u32)(result_bits >> 63);
+            const u64 exponent = result_bits & exponent_mask;
+            const u64 fraction = result_bits & 0x000FFFFFFFFFFFFFull;
+
+#if defined(__GNUC__) || defined(__clang__)
+            if (__builtin_expect(exponent != 0u, 1))
+#else
+            if (exponent != 0u)
+#endif
+                fprf = sign ? 0x08u : 0x04u;
+            else if (fraction != 0u)
+                fprf = sign ? 0x18u : 0x14u;
+            else
+                fprf = sign ? 0x12u : 0x02u;
+        }
+
+        set_fprf(cpu, fprf);
         *output = result;
         return true;
     }

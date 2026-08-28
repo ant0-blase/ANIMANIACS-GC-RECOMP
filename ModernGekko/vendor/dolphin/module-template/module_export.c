@@ -14,6 +14,38 @@
 #define CHASSIS_UNLIKELY(x) (x)
 #endif
 
+/*
+ * ANIMANIACS_IDLE_BURST_BREAK_V12_1
+ *
+ * These guest PCs are invariant-address busy waits converted by
+ * scripts/apply-generated-optimizations.py into one-poll helpers.
+ *
+ * Important: native burst chaining must stop as soon as one of those helpers
+ * returns with PC still at the wait head. Otherwise chassis_dispatch_burst()
+ * immediately re-enters the same helper hundreds of times and the C++ chassis
+ * never gets a chance to call CoreTiming::Idle().
+ */
+static inline int chassis_is_animaniacs_idle_pc(u32 pc)
+{
+    switch (pc)
+    {
+    case 0x8012C798u:
+    case 0x8013F83Cu:
+    case 0x80184190u:
+    case 0x8018420Cu:
+    case 0x801844A4u:
+    case 0x80184528u:
+    case 0x80184580u:
+    case 0x801846FCu:
+    case 0x8018BA68u:
+    case 0x8018F030u:
+    case 0x801ADD14u:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int chassis_dispatch(CPUState* ctx, u32 address)
 {
     return dolrecomp_call(ctx, address);
@@ -143,7 +175,7 @@ static u32 chassis_dispatch_burst(
      * cap only amortizes module <-> chassis transitions when many small chunks
      * are chainable inside the same timing slice.
      */
-    while (blocks < 256u && total_cycles < cycle_budget)
+    while (blocks < 1024u && total_cycles < cycle_budget)
     {
 #if defined(DOLRECOMP_HAS_INDEXED_LOOKUP)
 
@@ -168,8 +200,8 @@ static u32 chassis_dispatch_burst(
         }
 
         ctx->downcount = 0;
-        ctx->pc = pc;
 
+        // ctx->pc already equals pc.
         fn(ctx);
 
 #else
@@ -237,6 +269,9 @@ static u32 chassis_dispatch_burst(
         ctx->downcount = 0;
 
         if (CHASSIS_UNLIKELY(ctx->exception))
+            break;
+
+        if (CHASSIS_UNLIKELY(chassis_is_animaniacs_idle_pc(ctx->pc)))
             break;
     }
 

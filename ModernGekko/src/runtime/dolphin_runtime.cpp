@@ -5,6 +5,7 @@
 #include "Common/HookableEvent.h"
 #include "Core/Boot/Boot.h"
 #include "Core/Boot/BootManager.h"
+#include "Core/AnimaniacsSettings.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
@@ -89,7 +90,7 @@ std::string FormatWindowTitle(const std::string &title, double fps) {
 std::vector<std::string> Host_GetPreferredLocales() { return {}; }
 void Host_PPCSymbolsChanged() {}
 void Host_PPCBreakpointsChanged() {}
-bool Host_UIBlocksControllerState() { return false; }
+bool Host_UIBlocksControllerState() { return AnimaniacsPC::OverlayVisible(); }
 void Host_Message(HostMessageID id) {
   if (id == HostMessageID::WMUserStop && s_platform)
     s_platform->Stop();
@@ -287,6 +288,11 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   if (impl->config.graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE,
                     *impl->config.graphics.internal_resolution_scale);
+
+  // The GANE7U guest-side aspect globals below provide the actual camera /
+  // clipping aspect. Stretch here is only the final presentation step.
+  Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+
   Config::SetBase(Config::GFX_SHADER_CACHE, true);
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   ShaderCompilationMode::AsynchronousUberShaders);

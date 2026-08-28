@@ -16,6 +16,7 @@
 #include <thread>
 #include <unistd.h>
 
+#include <linux/input-event-codes.h>
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
@@ -26,6 +27,7 @@
 #include "xdg-decoration-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
+#include "Core/AnimaniacsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/State.h"
@@ -54,7 +56,7 @@ public:
   static void ToplevelConfigure(void* data, xdg_toplevel*, int32_t width, int32_t height,
                                 wl_array* states);
   static void ToplevelClose(void* data, xdg_toplevel*);
-  static void ToplevelConfigureBounds(void*, xdg_toplevel*, int32_t, int32_t) {}
+  static void ToplevelConfigureBounds(void* data, xdg_toplevel*, int32_t width, int32_t height);
   static void ToplevelWmCapabilities(void*, xdg_toplevel*, wl_array*) {}
 
   static void SeatCapabilities(void* data, wl_seat* seat, uint32_t capabilities);
@@ -70,10 +72,39 @@ public:
   static void KeyboardRepeatInfo(void*, wl_keyboard*, int32_t, int32_t) {}
 
   static void PointerEnter(void* data, wl_pointer*, uint32_t serial, wl_surface* surface,
-                           wl_fixed_t, wl_fixed_t);
+                           wl_fixed_t x, wl_fixed_t y);
   static void PointerLeave(void* data, wl_pointer*, uint32_t, wl_surface* surface);
-  static void PointerMotion(void*, wl_pointer*, uint32_t, wl_fixed_t, wl_fixed_t) {}
-  static void PointerButton(void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) {}
+  static void PointerMotion(void* data, wl_pointer*, uint32_t, wl_fixed_t x, wl_fixed_t y)
+  {
+    if (g_presenter && AnimaniacsPC::OverlayVisible())
+      g_presenter->SetMousePos(static_cast<float>(wl_fixed_to_double(x)),
+                               static_cast<float>(wl_fixed_to_double(y)));
+  }
+  static void PointerButton(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t button,
+                            uint32_t state)
+  {
+    auto* platform = static_cast<PlatformWayland*>(data);
+    const bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
+    int imgui_button = -1;
+
+    if (button == BTN_LEFT)
+      imgui_button = 0;
+    else if (button == BTN_RIGHT)
+      imgui_button = 1;
+    else if (button == BTN_MIDDLE)
+      imgui_button = 2;
+
+    if (imgui_button >= 0)
+    {
+      if (down)
+        platform->m_mouse_button_mask |= 1u << imgui_button;
+      else
+        platform->m_mouse_button_mask &= ~(1u << imgui_button);
+
+      if (g_presenter && AnimaniacsPC::OverlayVisible())
+        g_presenter->SetMousePress(platform->m_mouse_button_mask);
+    }
+  }
   static void PointerAxis(void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {}
   static void PointerFrame(void*, wl_pointer*) {}
   static void PointerAxisSource(void*, wl_pointer*, uint32_t) {}
@@ -115,6 +146,7 @@ private:
   wl_surface* m_cursor_surface = nullptr;
   uint32_t m_pointer_serial = 0;
   bool m_pointer_inside = false;
+  u32 m_mouse_button_mask = 0;
 
   std::thread::id m_owner_thread;
   std::mutex m_title_mutex;
@@ -126,6 +158,8 @@ private:
   int32_t m_height = std::max(Config::Get(Config::MAIN_RENDER_WINDOW_HEIGHT), 1);
   int32_t m_pending_width = m_width;
   int32_t m_pending_height = m_height;
+  int32_t m_configure_bounds_width = 0;
+  int32_t m_configure_bounds_height = 0;
 };
 
 constexpr wl_registry_listener s_registry_listener = {PlatformWayland::RegistryGlobal,
@@ -269,6 +303,7 @@ bool PlatformWayland::Init()
   xdg_toplevel_set_app_id(m_toplevel, "org.moderngekko.Runner");
   xdg_toplevel_set_title(m_toplevel, "ModernGekko");
   xdg_surface_set_window_geometry(m_xdg_surface, 0, 0, m_width, m_height);
+  AnimaniacsPC::SetHostSurfaceSize(m_width, m_height);
   if (Config::Get(Config::MAIN_FULLSCREEN))
   {
     xdg_toplevel_set_fullscreen(m_toplevel, nullptr);
@@ -441,6 +476,7 @@ void PlatformWayland::SurfaceConfigure(void* data, xdg_surface* surface, uint32_
     platform->m_height = platform->m_pending_height;
     xdg_surface_set_window_geometry(platform->m_xdg_surface, 0, 0, platform->m_width,
                                     platform->m_height);
+    AnimaniacsPC::SetHostSurfaceSize(platform->m_width, platform->m_height);
     platform->m_resize_pending = false;
     if (g_presenter)
       g_presenter->ResizeSurface();
@@ -452,6 +488,7 @@ void PlatformWayland::ToplevelConfigure(void* data, xdg_toplevel*, int32_t width
                                         wl_array* states)
 {
   auto* platform = static_cast<PlatformWayland*>(data);
+
   bool fullscreen = false;
   const auto* state = static_cast<const uint32_t*>(states->data);
   const size_t state_count = states->size / sizeof(*state);
@@ -460,15 +497,49 @@ void PlatformWayland::ToplevelConfigure(void* data, xdg_toplevel*, int32_t width
     if (state[i] == XDG_TOPLEVEL_STATE_FULLSCREEN)
       fullscreen = true;
   }
+
+  const bool fullscreen_changed = fullscreen != platform->m_window_fullscreen;
   platform->m_window_fullscreen = fullscreen;
 
-  if (width > 0 && height > 0 &&
-      (width != platform->m_width || height != platform->m_height))
+  // xdg-shell permits width/height == 0. GNOME can do this during a fullscreen
+  // transition, especially with fractional scaling. In that case use the most
+  // recent configure_bounds recommendation when available.
+  if (fullscreen && (width <= 0 || height <= 0) &&
+      platform->m_configure_bounds_width > 0 &&
+      platform->m_configure_bounds_height > 0)
+  {
+    width = platform->m_configure_bounds_width;
+    height = platform->m_configure_bounds_height;
+  }
+
+  if (width > 0 && height > 0)
   {
     platform->m_pending_width = width;
     platform->m_pending_height = height;
+    if (width != platform->m_width || height != platform->m_height)
+      platform->m_resize_pending = true;
+  }
+
+  // A fullscreen state transition can change the Vulkan surface extent even
+  // when the logical dimensions are unchanged or reported as 0x0.
+  if (fullscreen_changed)
+  {
+    if (platform->m_pending_width <= 0)
+      platform->m_pending_width = platform->m_width;
+    if (platform->m_pending_height <= 0)
+      platform->m_pending_height = platform->m_height;
     platform->m_resize_pending = true;
   }
+}
+
+void PlatformWayland::ToplevelConfigureBounds(void* data, xdg_toplevel*, int32_t width,
+                                              int32_t height)
+{
+  auto* platform = static_cast<PlatformWayland*>(data);
+  if (width > 0)
+    platform->m_configure_bounds_width = width;
+  if (height > 0)
+    platform->m_configure_bounds_height = height;
 }
 
 void PlatformWayland::ToplevelClose(void* data, xdg_toplevel*)
@@ -621,6 +692,11 @@ void PlatformWayland::HandleHotkey(xkb_keysym_t symbol)
   {
     RequestShutdown();
   }
+  else if (symbol == XKB_KEY_F10 && ModifierActive(XKB_MOD_NAME_CTRL))
+  {
+    AnimaniacsPC::ToggleOverlay();
+    UpdateCursor();
+  }
   else if (symbol == XKB_KEY_F10)
   {
     const bool running = Core::GetState(system) == Core::State::Running;
@@ -629,11 +705,12 @@ void PlatformWayland::HandleHotkey(xkb_keysym_t symbol)
   }
   else if (symbol == XKB_KEY_Return && ModifierActive(XKB_MOD_NAME_ALT))
   {
+    // Request the transition and let ToplevelConfigure report the authoritative
+    // compositor state instead of flipping m_window_fullscreen optimistically.
     if (m_window_fullscreen)
       xdg_toplevel_unset_fullscreen(m_toplevel);
     else
       xdg_toplevel_set_fullscreen(m_toplevel, nullptr);
-    m_window_fullscreen = !m_window_fullscreen;
     wl_surface_commit(m_surface);
   }
   else if (symbol >= XKB_KEY_F1 && symbol <= XKB_KEY_F8)
@@ -662,13 +739,16 @@ void PlatformWayland::HandleHotkey(xkb_keysym_t symbol)
 }
 
 void PlatformWayland::PointerEnter(void* data, wl_pointer*, uint32_t serial, wl_surface* surface,
-                                   wl_fixed_t, wl_fixed_t)
+                                   wl_fixed_t x, wl_fixed_t y)
 {
   auto* platform = static_cast<PlatformWayland*>(data);
   if (surface == platform->m_surface)
   {
     platform->m_pointer_inside = true;
     platform->m_pointer_serial = serial;
+    if (g_presenter && AnimaniacsPC::OverlayVisible())
+      g_presenter->SetMousePos(static_cast<float>(wl_fixed_to_double(x)),
+                               static_cast<float>(wl_fixed_to_double(y)));
     platform->UpdateCursor();
   }
 }
@@ -685,7 +765,7 @@ void PlatformWayland::UpdateCursor()
   if (!m_pointer || !m_pointer_inside)
     return;
 
-  const bool hide = m_window_focus &&
+  const bool hide = m_window_focus && !AnimaniacsPC::OverlayVisible() &&
                     Config::Get(Config::MAIN_SHOW_CURSOR) == Config::ShowCursor::Never &&
                     Core::GetState(Core::System::GetInstance()) != Core::State::Paused;
   if (hide || !m_cursor_surface || !m_default_cursor || m_default_cursor->image_count == 0)

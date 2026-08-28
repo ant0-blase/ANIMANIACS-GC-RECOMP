@@ -486,6 +486,9 @@ float Presenter::CalculateDrawAspectRatio(bool allow_stretch) const
   // If stretch is enabled, we prefer the aspect ratio of the window.
   if (aspect_mode == AspectMode::Stretch)
   {
+    // Use the real renderer backbuffer here. Wayland xdg_toplevel sizes are
+    // surface-local logical coordinates and must not be treated as pixels
+    // (GNOME fractional scaling otherwise produces a smaller centered image).
     resulting_aspect_ratio =
         (static_cast<float>(m_backbuffer_width) / static_cast<float>(m_backbuffer_height));
   }
@@ -738,7 +741,9 @@ void Presenter::UpdateDrawRectangle()
     g_Config.fAspectRatioHackH = 1;
   }
 
-  // The rendering window size
+  // The rendering window size must be the actual graphics backbuffer size.
+  // xdg_toplevel.configure reports logical surface coordinates, which differ
+  // from pixels under GNOME Wayland fractional scaling.
   const float win_width = static_cast<float>(m_backbuffer_width);
   const float win_height = static_cast<float>(m_backbuffer_height);
   const float win_aspect_ratio = win_width / win_height;

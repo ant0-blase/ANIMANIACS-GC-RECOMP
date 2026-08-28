@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
+#include "Core/AnimaniacsSettings.h"
 #include "Core/System.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
@@ -13,6 +14,8 @@
 #include "Core/HW/SystemTimers.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstdio>
 
 namespace
@@ -82,14 +85,69 @@ void StaticRecompCore::Run()
       m_guest.ram[offset + 3] = static_cast<u8>(value);
     };
 
-    // 60 FPS
-    write8(0x8023EBCBu, 0x01u);
+    // 60+ FPS mode: the game waits this many VI retraces per rendered frame.
+    // Retail gameplay normally uses 2 (~30 FPS); the known 60 FPS code forces 1.
+    // Values below 1 do not exist, so >60 FPS is achieved by increasing the VI
+    // retrace rate while keeping this divisor at 1.
+    write32_be(0x8023EBC8u, 0x00000001u);
 
-    // 16:9 widescreen
-    // 0x41800000 = 16.0f
-    // 0x41100000 =  9.0f
-    write32_be(0x801C15E4u, 0x41800000u);
-    write32_be(0x801C15E8u, 0x41100000u);
+    // Live widescreen ratio. These are the same GANE7U guest globals used by
+    // the known Gecko 16:9 patch, but the pair now follows the PC menu.
+    const auto [aspect_width, aspect_height] = AnimaniacsPC::GuestAspectPair();
+    write32_be(0x801C15E4u, std::bit_cast<u32>(aspect_width));
+    write32_be(0x801C15E8u, std::bit_cast<u32>(aspect_height));
+
+    /*
+     * GANE7U native horizontal FOV, recovered from the retail main.dol.
+     *
+     * 0x801C15DC = 0x3F1C61AA = 0.610865235 rad = 35 degrees
+     *                ^ half of the native ~70 degree horizontal FOV
+     *
+     * func 0x8005D754 loads that value, calls the game's tanf wrapper at
+     * 0x8018583C, then computes:
+     *
+     *   x_scale = 1 / tan(hFOV / 2)
+     *   y_scale = x_scale * aspect_width / aspect_height
+     *
+     * and stores the live projection coefficients at:
+     *
+     *   0x8026B978 = x_scale
+     *   0x8026B97C = y_scale
+     *
+     * Updating all three values makes Ctrl+F10 FOV changes live immediately,
+     * without touching Dolphin's generic perspective matrices (which also
+     * drive shadow/reflection/auxiliary passes).
+     */
+    constexpr float pi = 3.14159265358979323846f;
+    constexpr float native_hfov = 70.0f;
+
+    const float requested_hfov = AnimaniacsPC::FovDegrees();
+    const float hfov =
+        requested_hfov > 0.0f ? std::clamp(requested_hfov, 45.0f, 120.0f) : native_hfov;
+    const float half_fov_radians = hfov * pi / 360.0f;
+
+    if (std::isfinite(half_fov_radians) && half_fov_radians > 0.0f)
+    {
+      const float tangent = std::tan(half_fov_radians);
+      const float aspect =
+          (aspect_height != 0.0f) ? (aspect_width / aspect_height) : (4.0f / 3.0f);
+
+      if (std::isfinite(tangent) && tangent > 0.00001f &&
+          std::isfinite(aspect) && aspect > 0.0f)
+      {
+        const float x_scale = 1.0f / tangent;
+        const float y_scale = x_scale * aspect;
+
+        // Keep the game's source constant synchronized for any code path that
+        // rebuilds the projection later.
+        write32_be(0x801C15DCu, std::bit_cast<u32>(half_fov_radians));
+
+        // And update the already-derived live coefficients so the slider takes
+        // effect immediately, even if func_8005D754 is not called this frame.
+        write32_be(0x8026B978u, std::bit_cast<u32>(x_scale));
+        write32_be(0x8026B97Cu, std::bit_cast<u32>(y_scale));
+      }
+    }
   };
 
   apply_gane_enhancements();
@@ -104,8 +162,38 @@ void StaticRecompCore::Run()
     return;
   }
 
+  int anim_last_fps_target = -1;
+
   while (*state_ptr == CPU::State::Running)
   {
+    // GANE7U >60 FPS: the guest frame divisor bottoms out at 1, so increase
+    // the VI retrace cadence instead. Core/DSP/audio clocks remain untouched.
+    const int anim_fps_target = AnimaniacsPC::FpsTarget();
+    if (anim_fps_target != anim_last_fps_target)
+    {
+      constexpr double NTSC_VPS = 59.94005994005994;
+
+      if (anim_fps_target > 60)
+      {
+        const float vi_factor =
+            static_cast<float>(static_cast<double>(anim_fps_target) / NTSC_VPS);
+        Config::SetCurrent(Config::MAIN_VI_OVERCLOCK, vi_factor);
+        Config::SetCurrent(Config::MAIN_VI_OVERCLOCK_ENABLE, true);
+        Config::SetCurrent(Config::MAIN_PRECISION_FRAME_TIMING, true);
+        std::fprintf(stderr,
+                     "[ANIM-FPS] target=%d VI factor=%.6f (CPU/DSP/audio clock unchanged)\n",
+                     anim_fps_target, vi_factor);
+      }
+      else
+      {
+        Config::SetCurrent(Config::MAIN_VI_OVERCLOCK_ENABLE, false);
+        Config::SetCurrent(Config::MAIN_VI_OVERCLOCK, 1.0f);
+        std::fprintf(stderr, "[ANIM-FPS] 60 FPS native VI cadence\n");
+      }
+
+      anim_last_fps_target = anim_fps_target;
+    }
+
     apply_gane_enhancements();
     core_timing.Advance();
     const std::string current_game_id = SConfig::GetInstance().GetGameID();

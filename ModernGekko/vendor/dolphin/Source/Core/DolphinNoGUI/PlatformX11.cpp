@@ -12,6 +12,7 @@ static constexpr auto X_None = None;
 #include "DolphinNoGUI/Platform.h"
 
 #include "Common/MsgHandler.h"
+#include "Core/AnimaniacsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/State.h"
@@ -60,6 +61,7 @@ private:
   int m_window_y = Config::Get(Config::MAIN_RENDER_WINDOW_YPOS);
   unsigned int m_window_width = Config::Get(Config::MAIN_RENDER_WINDOW_WIDTH);
   unsigned int m_window_height = Config::Get(Config::MAIN_RENDER_WINDOW_HEIGHT);
+  u32 m_mouse_button_mask = 0;
 };
 
 PlatformX11::~PlatformX11()
@@ -89,7 +91,9 @@ bool PlatformX11::Init()
 
   m_window = XCreateSimpleWindow(m_display, DefaultRootWindow(m_display), m_window_x, m_window_y,
                                  m_window_width, m_window_height, 0, 0, BlackPixel(m_display, 0));
-  XSelectInput(m_display, m_window, StructureNotifyMask | KeyPressMask | FocusChangeMask);
+  XSelectInput(m_display, m_window,
+               StructureNotifyMask | KeyPressMask | FocusChangeMask | PointerMotionMask |
+                   ButtonPressMask | ButtonReleaseMask);
   Atom wmProtocols[1];
   wmProtocols[0] = XInternAtom(m_display, "WM_DELETE_WINDOW", True);
   XSetWMProtocols(m_display, m_window, wmProtocols, 1);
@@ -127,10 +131,12 @@ bool PlatformX11::Init()
     XDefineCursor(m_display, m_window, m_blank_cursor);
   }
 
-  // Enter fullscreen if enabled.
+  // Enter fullscreen if enabled using an explicit EWMH state instead of
+  // TOGGLE, so the local state cannot drift away from the window manager.
   if (Config::Get(Config::MAIN_FULLSCREEN))
   {
-    m_window_fullscreen = X11Utils::ToggleFullscreen(m_display, m_window);
+    if (X11Utils::SetFullscreen(m_display, m_window, true))
+      m_window_fullscreen = true;
 #ifdef HAVE_XRANDR
     m_xrr_config->ToggleDisplayMode(True);
 #endif
@@ -192,7 +198,18 @@ void PlatformX11::ProcessEvents()
     {
     case KeyPress:
       key = XLookupKeysym((XKeyEvent*)&event, 0);
-      if (key == XK_Escape && (event.xkey.state & ControlMask))
+      if (key == XK_F10 && (event.xkey.state & ControlMask))
+      {
+        AnimaniacsPC::ToggleOverlay();
+        if (Config::Get(Config::MAIN_SHOW_CURSOR) == Config::ShowCursor::Never)
+        {
+          if (AnimaniacsPC::OverlayVisible())
+            XUndefineCursor(m_display, m_window);
+          else if (Core::GetState(Core::System::GetInstance()) == Core::State::Running)
+            XDefineCursor(m_display, m_window, m_blank_cursor);
+        }
+      }
+      else if (key == XK_Escape && (event.xkey.state & ControlMask))
       {
         RequestShutdown();
       }
@@ -213,12 +230,14 @@ void PlatformX11::ProcessEvents()
       }
       else if ((key == XK_Return) && (event.xkey.state & Mod1Mask))
       {
-        m_window_fullscreen = !m_window_fullscreen;
-        X11Utils::ToggleFullscreen(m_display, m_window);
+        const bool fullscreen = !m_window_fullscreen;
+        if (X11Utils::SetFullscreen(m_display, m_window, fullscreen))
+        {
+          m_window_fullscreen = fullscreen;
 #ifdef HAVE_XRANDR
-        m_xrr_config->ToggleDisplayMode(m_window_fullscreen);
+          m_xrr_config->ToggleDisplayMode(m_window_fullscreen);
 #endif
-        UpdateWindowPosition();
+        }
       }
       else if (key >= XK_F1 && key <= XK_F8)
       {
@@ -240,6 +259,34 @@ void PlatformX11::ProcessEvents()
           State::UndoSaveState(Core::System::GetInstance());
       }
       break;
+    case MotionNotify:
+      if (g_presenter && AnimaniacsPC::OverlayVisible())
+        g_presenter->SetMousePos(static_cast<float>(event.xmotion.x),
+                                 static_cast<float>(event.xmotion.y));
+      break;
+    case ButtonPress:
+    case ButtonRelease:
+    {
+      const bool down = event.type == ButtonPress;
+      int button = -1;
+      if (event.xbutton.button == Button1)
+        button = 0;
+      else if (event.xbutton.button == Button3)
+        button = 1;
+      else if (event.xbutton.button == Button2)
+        button = 2;
+
+      if (button >= 0)
+      {
+        if (down)
+          m_mouse_button_mask |= 1u << button;
+        else
+          m_mouse_button_mask &= ~(1u << button);
+        if (g_presenter && AnimaniacsPC::OverlayVisible())
+          g_presenter->SetMousePress(m_mouse_button_mask);
+      }
+      break;
+    }
     case FocusIn:
     {
       m_window_focus = true;
@@ -266,6 +313,9 @@ void PlatformX11::ProcessEvents()
     break;
     case ConfigureNotify:
     {
+      const int width = std::max(event.xconfigure.width, 1);
+      const int height = std::max(event.xconfigure.height, 1);
+      AnimaniacsPC::SetHostSurfaceSize(width, height);
       if (g_presenter)
         g_presenter->ResizeSurface();
     }

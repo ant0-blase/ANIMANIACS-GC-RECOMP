@@ -18,6 +18,30 @@ extern char** environ;
 
 namespace X11Utils
 {
+bool SetFullscreen(Display* dpy, Window win, bool fullscreen)
+{
+  XEvent event{};
+  event.xclient.type = ClientMessage;
+  event.xclient.message_type = XInternAtom(dpy, "_NET_WM_STATE", False);
+  event.xclient.window = win;
+  event.xclient.format = 32;
+  event.xclient.data.l[0] = fullscreen ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
+  event.xclient.data.l[1] = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+  event.xclient.data.l[2] = 0;
+  event.xclient.data.l[3] = 1;
+  event.xclient.data.l[4] = 0;
+
+  if (!XSendEvent(dpy, DefaultRootWindow(dpy), False,
+                  SubstructureRedirectMask | SubstructureNotifyMask, &event))
+  {
+    ERROR_LOG_FMT(VIDEO, "Failed to switch fullscreen/windowed mode.");
+    return false;
+  }
+
+  XFlush(dpy);
+  return true;
+}
+
 bool ToggleFullscreen(Display* dpy, Window win)
 {
   // Init X event structure for _NET_WM_STATE_FULLSCREEN client message

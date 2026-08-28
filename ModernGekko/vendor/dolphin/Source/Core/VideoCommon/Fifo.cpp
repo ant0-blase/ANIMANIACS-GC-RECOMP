@@ -368,7 +368,13 @@ void FifoManager::RunGpuLoop()
                                            std::memory_order_relaxed);
             }
 
-            command_processor.SetCPStatusFromGPU();
+            // ANIM_CP_STATUS_PER_BURST_GATE
+            // Avoid an out-of-line CP status update after every 32-byte FIFO
+            // burst when no breakpoint/watermark status interrupt can fire.
+            // If the CPU enables one while this loop is running, the cached
+            // atomic gate flips and the next burst takes the exact slow path.
+            if (fifo.bFF_StatusInterruptsEnabled.load(std::memory_order_relaxed)) [[unlikely]]
+              command_processor.SetCPStatusFromGPU();
 
             if (m_config_sync_gpu)
             {

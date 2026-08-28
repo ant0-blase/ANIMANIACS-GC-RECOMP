@@ -251,6 +251,36 @@ template u64 MMU::Read<u64>(const u32 address);
 template <std::unsigned_integral T>
 void MMU::Write(const Common::MakeAtLeastU32<T> var, const u32 address)
 {
+  /*
+   * ANIMANIACS_RAM_WRITE_FAST_V12_4
+   *
+   * Write-side twin of the conservative MMU::Read BAT fast path.
+   * For translated, cache-disabled, non-WI MEM1 stores, bypass
+   * TranslateAddress + generic hardware dispatch and commit the
+   * guest big-endian value directly.
+   */
+  if (!m_power_pc.GetMemChecks().HasAny() && m_ppc_state.msr.DR &&
+      !m_ppc_state.m_enable_dcache && !StaticRecompLockstep::g_ram_write_journal &&
+      (address & (BAT_PAGE_SIZE - 1)) <= BAT_PAGE_SIZE - sizeof(T))
+  {
+    const u32 bat_result = m_dbat_table[address >> BAT_INDEX_SHIFT];
+
+    if ((bat_result & (BAT_PHYSICAL_BIT | BAT_WI_BIT)) == BAT_PHYSICAL_BIT)
+    {
+      const u32 physical =
+          (bat_result & BAT_RESULT_MASK) | (address & (BAT_PAGE_SIZE - 1));
+      const u32 ram_size = m_memory.GetRamSizeReal();
+
+      if (m_memory.GetRAM() && ram_size >= sizeof(T) &&
+          physical <= ram_size - sizeof(T))
+      {
+        const T raw = bswap(static_cast<T>(var));
+        std::memcpy(m_memory.GetRAM() + physical, &raw, sizeof(raw));
+        return;
+      }
+    }
+  }
+
   Memcheck(address, var, true, sizeof(T));
   WriteToHardware<XCheckTLBFlag::Write>(address, var, sizeof(T));
 }

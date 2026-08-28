@@ -5,138 +5,36 @@ import argparse
 from pathlib import Path
 import sys
 
-MARKER = "ANIMANIACS_PERF_OPT_8013F83C_V3"
-FUNC_SIGNATURE = "static void loop_8013F83C(CPUState* ctx)"
-
-REPLACEMENT = r'''static void loop_8013F83C(CPUState* ctx) {
-    /* ANIMANIACS_PERF_OPT_8013F83C_V3
-     *
-     * GANE7U hot polling loop.
-     *
-     * V2 stopped rewriting unchanged r0/CR0/PC state. V3 also hoists the MEM1
-     * translation and keeps downcount in a host register while the word is
-     * zero. The relaxed atomic load prevents the compiler from caching a word
-     * which can be changed by another emulation thread.
-     *
-     * The portable mem_read32 path remains below for unusual addresses/hosts.
-     */
-    const u32 ea = ctx->gpr[13] + (u32)(s32)(-23240);
-    const u32 cr_low = ctx->cr & 0x0FFFFFFFu;
-    const u32 so = (ctx->xer >> 31) & 1u;
-    const u32 cr_eq = cr_low | ((0x2u | so) << 28);
-    const u32 cr_gt = cr_low | ((0x4u | so) << 28);
-
-#if defined(__GNUC__) || defined(__clang__)
-    const u32 masked_ea = ea & ~0x40000000u;
-    const u32 offset = masked_ea - GC_RAM_BASE;
-
-    if (ctx->ram != 0 && (ea & 3u) == 0u && offset <= GC_MAIN_RAM_SIZE - 4u) {
-        const u32* const poll_word =
-            (const u32*)(const void*)(ctx->ram + offset);
-        s64 downcount = ctx->downcount;
-
-        ctx->pc = 0x8013F83Cu;
-
-        downcount -= 3;
-        u32 raw = __atomic_load_n(poll_word, __ATOMIC_RELAXED);
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-        u32 value = raw;
-#else
-        u32 value = __builtin_bswap32(raw);
-#endif
-        ctx->gpr[0] = value;
-
-        if (value != 0u) {
-            ctx->downcount = downcount;
-            ctx->cr = cr_gt;
-            ctx->pc = 0x8013F848u;
-            return;
-        }
-
-        ctx->cr = cr_eq;
-
-        if (downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
-            ctx->downcount = downcount;
-            return;
-        }
-
-        for (;;) {
-            downcount -= 3;
-            raw = __atomic_load_n(poll_word, __ATOMIC_RELAXED);
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-            value = raw;
-#else
-            value = __builtin_bswap32(raw);
-#endif
-
-            if (value != 0u) {
-                ctx->downcount = downcount;
-                ctx->gpr[0] = value;
-                ctx->cr = cr_gt;
-                ctx->pc = 0x8013F848u;
-                return;
-            }
-
-            if (downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
-                ctx->downcount = downcount;
-                return;
-            }
-        }
-    }
-#endif
-
-    /* Exact portable/MMIO fallback: V2 behavior. */
-    ctx->pc = 0x8013F83Cu;
-
-    ctx->downcount -= 3;
-    u32 value = mem_read32(ctx, ea);
-    ctx->gpr[0] = value;
-
-    if (value != 0u) {
-        ctx->cr = cr_gt;
-        ctx->pc = 0x8013F848u;
-        return;
-    }
-
-    ctx->cr = cr_eq;
-
-    if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)
-        return;
-
-    for (;;) {
-        ctx->downcount -= 3;
-        value = mem_read32(ctx, ea);
-
-        if (value != 0u) {
-            ctx->gpr[0] = value;
-            ctx->cr = cr_gt;
-            ctx->pc = 0x8013F848u;
-            return;
-        }
-
-        if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)
-            return;
-    }
-}'''
+MARKER = "ANIMANIACS_IDLE_SPIN_V12"
+SPIN_LOOPS = (
+    (2148714392, 13, -30356, True, True),
+    (2148792380, 13, -23240, False, True),
+    (2149073296, 13, -29408, True, False),
+    (2149073420, 13, -29408, True, False),
+    (2149074084, 13, -29408, True, False),
+    (2149074216, 13, -29408, True, False),
+    (2149074304, 13, -29408, True, False),
+    (2149074684, 13, -29408, True, False),
+    (2149104232, 13, -29304, True, True),
+    (2149118000, 31, 124, True, True),
+    (2149244180, 13, -21372, True, True),
+)
 
 
-def find_function_span(text: str) -> tuple[int, int]:
-    start = text.find(FUNC_SIGNATURE)
+def find_function_span(text: str, signature: str) -> tuple[int, int]:
+    start = text.find(signature)
     if start < 0:
-        raise RuntimeError(f"{FUNC_SIGNATURE!r} not found")
-
+        raise RuntimeError(f"{signature!r} not found")
     brace = text.find("{", start)
     if brace < 0:
-        raise RuntimeError("function opening brace not found")
+        raise RuntimeError(f"{signature}: opening brace not found")
 
     depth = 0
     in_string = False
     in_char = False
     escaped = False
-    i = brace
-    while i < len(text):
-        ch = text[i]
-
+    for index in range(brace, len(text)):
+        ch = text[index]
         if escaped:
             escaped = False
         elif ch == "\\" and (in_string or in_char):
@@ -151,37 +49,45 @@ def find_function_span(text: str) -> tuple[int, int]:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return start, i + 1
-        i += 1
-
-    raise RuntimeError("function closing brace not found")
+                    return start, index + 1
+    raise RuntimeError(f"{signature}: closing brace not found")
 
 
-def patch_file(path: Path) -> bool:
-    text = path.read_text()
-    if MARKER in text:
-        print(f"[generated-opt] already optimized: {path}")
-        return False
+def replacement(address: int, base_gpr: int, displacement: int,
+                signed_cmp: bool, wait_while_zero: bool) -> str:
+    next_pc = address + 12
 
-    start, end = find_function_span(text)
-    old = text[start:end]
-
-    required = (
-        "0x8013F83C",
-        "0x8013F848",
-        "-23240",
-        "mem_read32",
-        "DOLRECOMP_C_LOOP_CYCLE_BUDGET",
-    )
-    missing = [token for token in required if token not in old]
-    if missing:
-        raise RuntimeError(
-            f"refusing to patch unexpected loop body; missing: {', '.join(missing)}"
+    if signed_cmp:
+        cr_calc = (
+            "    const s32 signed_value = (s32)value;\n"
+            "    const u32 compare_bits =\n"
+            "        signed_value < 0 ? 0x8u : (signed_value > 0 ? 0x4u : 0x2u);"
         )
+    else:
+        cr_calc = "    const u32 compare_bits = value != 0u ? 0x4u : 0x2u;"
 
-    path.write_text(text[:start] + REPLACEMENT + text[end:])
-    print(f"[generated-opt] optimized {path}")
-    return True
+    exit_test = "value != 0u" if wait_while_zero else "value == 0u"
+
+    return (
+        f"static void loop_{address:08X}(CPUState* ctx) {{\n"
+        f"    /* {MARKER}\n"
+        "     * Exact one-poll version of an invariant-address GANE7U busy wait.\n"
+        "     * When the wait is still active, PC stays at the loop head so the\n"
+        "     * StaticRecomp chassis can CoreTiming::Idle() the rest of the slice.\n"
+        "     */\n"
+        f"    const u32 ea = ctx->gpr[{base_gpr}] + (u32)(s32)({displacement});\n\n"
+        f"    ctx->pc = 0x{address:08X}u;\n"
+        "    ctx->downcount -= 3;\n\n"
+        "    const u32 value = mem_read32(ctx, ea);\n"
+        "    ctx->gpr[0] = value;\n\n"
+        "    const u32 cr_low = ctx->cr & 0x0FFFFFFFu;\n"
+        "    const u32 so = (ctx->xer >> 31) & 1u;\n"
+        f"{cr_calc}\n"
+        "    ctx->cr = cr_low | ((compare_bits | so) << 28);\n\n"
+        f"    if ({exit_test})\n"
+        f"        ctx->pc = 0x{next_pc:08X}u;\n"
+        "}\n"
+    )
 
 
 def main() -> int:
@@ -193,42 +99,63 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    artifact = args.artifact.resolve()
-    generated = artifact / "dolrecomp-output" / "generated"
-    chunks = generated / "chunks"
-
+    chunks = args.artifact.resolve() / "dolrecomp-output" / "generated" / "chunks"
     if not chunks.is_dir():
         print(f"error: generated chunk directory is missing: {chunks}", file=sys.stderr)
         return 1
 
-    # Locate by function signature, not by a chunk filename. This also makes
-    # the optimization survive future code-generator chunk-boundary changes.
-    candidates = []
-    for candidate in sorted(chunks.glob("chunk_*_text1_*.c")):
+    files = sorted(chunks.glob("chunk_*_text1_*.c"))
+    if not files:
+        print(f"error: no generated text1 chunks in {chunks}", file=sys.stderr)
+        return 1
+
+    contents: dict[Path, str] = {}
+    owners: dict[int, list[Path]] = {}
+
+    for path in files:
         try:
-            candidate_text = candidate.read_text()
+            text = path.read_text()
         except UnicodeDecodeError:
             continue
-        if FUNC_SIGNATURE in candidate_text:
-            candidates.append(candidate)
+        contents[path] = text
+        for address, *_ in SPIN_LOOPS:
+            signature = f"static void loop_{address:08X}(CPUState* ctx)"
+            if signature in text:
+                owners.setdefault(address, []).append(path)
 
-    if len(candidates) != 1:
-        print(
-            f"error: expected exactly one generated {FUNC_SIGNATURE}, "
-            f"found {len(candidates)} in {chunks}",
-            file=sys.stderr,
-        )
-        for candidate in candidates:
-            print(f"  {candidate}", file=sys.stderr)
-        return 1
+    changed_files: set[Path] = set()
+    patched = 0
 
-    try:
-        changed = patch_file(candidates[0])
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    for address, base_gpr, displacement, signed_cmp, wait_while_zero in SPIN_LOOPS:
+        hits = owners.get(address, [])
+        if len(hits) == 0:
+            print(f"[generated-opt] warning: loop_{address:08X} not emitted as helper")
+            continue
+        if len(hits) != 1:
+            print(f"error: loop_{address:08X} emitted {len(hits)} times", file=sys.stderr)
+            return 1
 
-    print("[generated-opt] result=" + ("changed" if changed else "unchanged"))
+        path = hits[0]
+        text = contents[path]
+        signature = f"static void loop_{address:08X}(CPUState* ctx)"
+        start, end = find_function_span(text, signature)
+        old = text[start:end]
+
+        if MARKER in old:
+            continue
+
+        text = text[:start] + replacement(
+            address, base_gpr, displacement, signed_cmp, wait_while_zero
+        ) + text[end:]
+        contents[path] = text
+        changed_files.add(path)
+        patched += 1
+
+    for path in sorted(changed_files):
+        path.write_text(contents[path])
+        print(f"[generated-opt] idle-spin optimized {path}")
+
+    print(f"[generated-opt] idle-spin helpers patched: {patched}/{len(SPIN_LOOPS)}")
     return 0
 
 

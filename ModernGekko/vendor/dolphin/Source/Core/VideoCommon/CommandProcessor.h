@@ -46,6 +46,10 @@ struct SCPFifoStruct
   std::atomic<u32> bFF_LoWatermarkInt = 0;
   std::atomic<u32> bFF_HiWatermarkInt = 0;
 
+  // Derived fast gate for SetCPStatusFromGPU().
+  // 1 iff a breakpoint/high/low-watermark CP interrupt can currently fire.
+  std::atomic<u32> bFF_StatusInterruptsEnabled = 0;
+
   std::atomic<u32> bFF_LoWatermark = 0;
   std::atomic<u32> bFF_HiWatermark = 0;
 

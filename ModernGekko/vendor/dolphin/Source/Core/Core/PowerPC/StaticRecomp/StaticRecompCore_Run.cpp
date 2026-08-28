@@ -22,6 +22,30 @@ namespace
 {
 constexpr u32 SYNC_EXCEPTION_MASK = ~static_cast<u32>(
     EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER | EXCEPTION_PERFORMANCE_MONITOR);
+
+bool IsAnimaniacsSpinIdlePC(u32 pc)
+{
+  // Retail GANE7U invariant-address busy waits. The code in these loops
+  // cannot make its own exit condition true; an emulated event/device/thread
+  // must change the polled word.
+  switch (pc)
+  {
+  case 0x8012C798u:
+  case 0x8013F83Cu:
+  case 0x80184190u:
+  case 0x8018420Cu:
+  case 0x801844A4u:
+  case 0x80184528u:
+  case 0x80184580u:
+  case 0x801846FCu:
+  case 0x8018BA68u:
+  case 0x8018F030u:
+  case 0x801ADD14u:
+    return true;
+  default:
+    return false;
+  }
+}
 }
 
 void StaticRecompCore::Run()
@@ -58,18 +82,6 @@ void StaticRecompCore::Run()
   {
     constexpr u32 mem1_base = 0x80000000u;
 
-    const auto write8 = [&](u32 address, u8 value)
-    {
-      if (address < mem1_base)
-        return;
-
-      const u32 offset = address - mem1_base;
-      if (offset >= m_guest.ram_size)
-        return;
-
-      m_guest.ram[offset] = value;
-    };
-
     const auto write32_be = [&](u32 address, u32 value)
     {
       if (address < mem1_base)
@@ -96,58 +108,6 @@ void StaticRecompCore::Run()
     const auto [aspect_width, aspect_height] = AnimaniacsPC::GuestAspectPair();
     write32_be(0x801C15E4u, std::bit_cast<u32>(aspect_width));
     write32_be(0x801C15E8u, std::bit_cast<u32>(aspect_height));
-
-    /*
-     * GANE7U native horizontal FOV, recovered from the retail main.dol.
-     *
-     * 0x801C15DC = 0x3F1C61AA = 0.610865235 rad = 35 degrees
-     *                ^ half of the native ~70 degree horizontal FOV
-     *
-     * func 0x8005D754 loads that value, calls the game's tanf wrapper at
-     * 0x8018583C, then computes:
-     *
-     *   x_scale = 1 / tan(hFOV / 2)
-     *   y_scale = x_scale * aspect_width / aspect_height
-     *
-     * and stores the live projection coefficients at:
-     *
-     *   0x8026B978 = x_scale
-     *   0x8026B97C = y_scale
-     *
-     * Updating all three values makes Ctrl+F10 FOV changes live immediately,
-     * without touching Dolphin's generic perspective matrices (which also
-     * drive shadow/reflection/auxiliary passes).
-     */
-    constexpr float pi = 3.14159265358979323846f;
-    constexpr float native_hfov = 70.0f;
-
-    const float requested_hfov = AnimaniacsPC::FovDegrees();
-    const float hfov =
-        requested_hfov > 0.0f ? std::clamp(requested_hfov, 45.0f, 120.0f) : native_hfov;
-    const float half_fov_radians = hfov * pi / 360.0f;
-
-    if (std::isfinite(half_fov_radians) && half_fov_radians > 0.0f)
-    {
-      const float tangent = std::tan(half_fov_radians);
-      const float aspect =
-          (aspect_height != 0.0f) ? (aspect_width / aspect_height) : (4.0f / 3.0f);
-
-      if (std::isfinite(tangent) && tangent > 0.00001f &&
-          std::isfinite(aspect) && aspect > 0.0f)
-      {
-        const float x_scale = 1.0f / tangent;
-        const float y_scale = x_scale * aspect;
-
-        // Keep the game's source constant synchronized for any code path that
-        // rebuilds the projection later.
-        write32_be(0x801C15DCu, std::bit_cast<u32>(half_fov_radians));
-
-        // And update the already-derived live coefficients so the slider takes
-        // effect immediately, even if func_8005D754 is not called this frame.
-        write32_be(0x8026B978u, std::bit_cast<u32>(x_scale));
-        write32_be(0x8026B97Cu, std::bit_cast<u32>(y_scale));
-      }
-    }
 
     /*
      * ANIM_PC_V10_TIMING_ASPECT
@@ -263,9 +223,6 @@ void StaticRecompCore::Run()
 
     apply_gane_enhancements();
     core_timing.Advance();
-    const std::string current_game_id = SConfig::GetInstance().GetGameID();
-    m_module_active = m_module && (current_game_id.empty() || current_game_id == m_module->game_id);
-
     do
     {
       // MSR.FP needs no gate here: generated FPU instructions raise the
@@ -373,10 +330,13 @@ void StaticRecompCore::Run()
           m_burst_tb_cycles += static_cast<u64>(charge > 0 ? charge : 1);
           m_guest.timebase = m_burst_tb_base + m_burst_tb_cycles / SystemTimers::TIMER_RATIO;
 
-          // Idle loop skipping for configured target loops (e.g. Wii Menu OSIdleThread)
-          if (m_guest.pc == m_idle_pc && m_idle_pc != 0)
+          // Idle loop skipping for both the generic configured target and the
+          // proven GANE7U spin-wait PCs. Generated helpers return after one
+          // exact poll with PC left at the loop head while waiting.
+          if ((m_guest.pc == m_idle_pc && m_idle_pc != 0) ||
+              IsAnimaniacsSpinIdlePC(m_guest.pc))
           {
-            m_system.GetCoreTiming().Idle();
+            core_timing.Idle();
           }
 
           // ctx->timebase is refreshed at burst start (SyncIn), and here we

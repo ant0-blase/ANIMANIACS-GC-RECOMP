@@ -208,6 +208,35 @@ TryReadInstResult MMU::TryReadInstruction(u32 address)
 template <std::unsigned_integral T>
 T MMU::Read(const u32 address)
 {
+  /*
+   * Conservative fallback-JIT RAM fast path.
+   *
+   * Only bypass generic hardware dispatch when the same conditions used by
+   * Dolphin's optimizable-RAM logic hold: no memchecks, translated data
+   * access, dcache disabled, physical BAT mapping, no BAT-page crossing, and
+   * a final address inside MEM1. Every other access takes the original path.
+   */
+  if (!m_power_pc.GetMemChecks().HasAny() && m_ppc_state.msr.DR &&
+      !m_ppc_state.m_enable_dcache &&
+      (address & (BAT_PAGE_SIZE - 1)) <= BAT_PAGE_SIZE - sizeof(T))
+  {
+    const u32 bat_result = m_dbat_table[address >> BAT_INDEX_SHIFT];
+    if ((bat_result & BAT_PHYSICAL_BIT) != 0)
+    {
+      const u32 physical =
+          (bat_result & BAT_RESULT_MASK) | (address & (BAT_PAGE_SIZE - 1));
+      const u32 ram_size = m_memory.GetRamSizeReal();
+
+      if (m_memory.GetRAM() && ram_size >= sizeof(T) &&
+          physical <= ram_size - sizeof(T))
+      {
+        T raw{};
+        std::memcpy(&raw, m_memory.GetRAM() + physical, sizeof(raw));
+        return bswap(raw);
+      }
+    }
+  }
+
   T var = ReadFromHardware<XCheckTLBFlag::Read, T>(address);
   Memcheck(address, var, false, sizeof(T));
   return var;

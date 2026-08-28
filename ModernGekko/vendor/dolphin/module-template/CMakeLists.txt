@@ -168,8 +168,16 @@ if(MSVC)
   endif()
 elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_compile_options(${MODULE_NAME} PRIVATE
-    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math)
+    -O${RECOMPCORE_MODULE_OPT_LEVEL}
+    -ffp-contract=off
+    -fno-fast-math
+    -fno-math-errno
+    -fno-semantic-interposition)
 elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
   target_compile_options(${MODULE_NAME} PRIVATE
-    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math)
+    -O${RECOMPCORE_MODULE_OPT_LEVEL}
+    -ffp-contract=off
+    -fno-fast-math
+    -fno-math-errno
+    -fno-semantic-interposition)
 endif()

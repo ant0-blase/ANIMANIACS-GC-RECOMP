@@ -8,6 +8,12 @@
 
 #include "StaticRecompABI.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define CHASSIS_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define CHASSIS_UNLIKELY(x) (x)
+#endif
+
 static int chassis_dispatch(CPUState* ctx, u32 address)
 {
     return dolrecomp_call(ctx, address);
@@ -132,8 +138,12 @@ static u32 chassis_dispatch_burst(
     /*
      * Hard cap prevents pathological zero-cost control-flow from staying in
      * the module forever. Normal exit is the guest cycle budget.
+     *
+     * The cycle budget is still the CoreTiming boundary. Raising this safety
+     * cap only amortizes module <-> chassis transitions when many small chunks
+     * are chainable inside the same timing slice.
      */
-    while (blocks < 64u && total_cycles < cycle_budget)
+    while (blocks < 256u && total_cycles < cycle_budget)
     {
 #if defined(DOLRECOMP_HAS_INDEXED_LOOKUP)
 
@@ -150,9 +160,9 @@ static u32 chassis_dispatch_burst(
             dolrecomp_find_original_indexed(
                 pc, &chunk_index);
 
-        if (!fn ||
+        if (CHASSIS_UNLIKELY(!fn ||
             chunk_index >= chain_state_count ||
-            chain_state[chunk_index] == 0u)
+            chain_state[chunk_index] == 0u))
         {
             break;
         }
@@ -226,7 +236,7 @@ static u32 chassis_dispatch_burst(
 
         ctx->downcount = 0;
 
-        if (ctx->exception)
+        if (CHASSIS_UNLIKELY(ctx->exception))
             break;
     }
 

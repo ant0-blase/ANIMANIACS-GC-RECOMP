@@ -307,6 +307,31 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
         result = (f64)(f32)result;
     }
 
+    /*
+     * Hot finite path. Keep all existing FMA/Force25Bit/tie-correction math
+     * untouched; only bypass special-value handling when all operands and the
+     * result are definitely finite.
+     */
+    const u64 exponent_mask = 0x7FF0000000000000ull;
+    const bool finite =
+        (f64_bits(a) & exponent_mask) != exponent_mask &&
+        (f64_bits(b) & exponent_mask) != exponent_mask &&
+        (f64_bits(c) & exponent_mask) != exponent_mask &&
+        (f64_bits(result) & exponent_mask) != exponent_mask;
+
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_expect(finite, 1))
+#else
+    if (finite)
+#endif
+    {
+        if (negative)
+            result = -result;
+        set_fprf(cpu, single ? classify_f32((f32)result) : classify_f64(result));
+        *output = result;
+        return true;
+    }
+
     if (isnan(result)) {
         u32 invalid = 0;
         if (is_snan(a) || is_snan(b) || is_snan(c))

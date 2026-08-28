@@ -10,6 +10,7 @@
 #include "Common/Timer.h"
 
 #include "Core/Achievements/AchievementManager.h"
+#include "Core/AnimaniacsSettings.h"
 #include "Core/Config/AchievementSettings.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
@@ -31,11 +32,251 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <inttypes.h>
 #include <mutex>
+#include <string>
 
 #include <imgui.h>
 #include <implot.h>
+
+namespace
+{
+std::string AnimaniacsSettingsPath()
+{
+  return File::GetUserPath(D_CONFIG_IDX) + "ANIMANIACS_PC.ini";
+}
+
+void ApplyAnimaniacsPresentationMode()
+{
+  Config::SetCurrent(Config::GFX_CROP_TO_ASPECT_RATIO, false);
+
+  if (!AnimaniacsPC::WidescreenEnabled())
+  {
+    Config::SetCurrent(Config::GFX_ASPECT_RATIO, AspectMode::ForceStandard);
+    return;
+  }
+
+  const float aspect = AnimaniacsPC::AspectOverride();
+
+  // Auto means "use the compositor/Vulkan surface exactly".
+  if (aspect <= 0.0f)
+  {
+    Config::SetCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+    return;
+  }
+
+  // Fixed presets use Dolphin's exact custom-stretch target instead of
+  // collapsing every widescreen choice to Stretch. This makes 16:9, 16:10,
+  // 21:9 and 32:9 visibly distinct and gives the expected letter/pillar bars
+  // when a fixed ratio does not match the monitor.
+  int width = 16;
+  int height = 9;
+  if (std::fabs(aspect - 16.0f / 10.0f) < 0.01f)
+  {
+    width = 16;
+    height = 10;
+  }
+  else if (std::fabs(aspect - 21.0f / 9.0f) < 0.02f)
+  {
+    width = 21;
+    height = 9;
+  }
+  else if (std::fabs(aspect - 32.0f / 9.0f) < 0.02f)
+  {
+    width = 32;
+    height = 9;
+  }
+
+  Config::SetCurrent(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH, width);
+  Config::SetCurrent(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT, height);
+  Config::SetCurrent(Config::GFX_ASPECT_RATIO, AspectMode::CustomStretch);
+}
+
+void SaveAnimaniacsSettings()
+{
+  std::ofstream out(AnimaniacsSettingsPath(), std::ios::trunc);
+  if (!out)
+    return;
+
+  out << "widescreen=" << (AnimaniacsPC::WidescreenEnabled() ? 1 : 0) << '\n';
+  out << "aspect_override=" << AnimaniacsPC::AspectOverride() << '\n';
+  out << "fov=" << AnimaniacsPC::FovDegrees() << '\n';
+  out << "fps_target=" << AnimaniacsPC::FpsTarget() << '\n';
+  out << "internal_resolution=" << Config::Get(Config::GFX_EFB_SCALE) << '\n';
+  out << "vsync=" << (Config::Get(Config::GFX_VSYNC) ? 1 : 0) << '\n';
+}
+
+void LoadAnimaniacsSettingsOnce()
+{
+  static bool loaded = false;
+  if (loaded)
+    return;
+  loaded = true;
+
+  std::ifstream in(AnimaniacsSettingsPath());
+  std::string line;
+  while (std::getline(in, line))
+  {
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos)
+      continue;
+
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+
+    if (key == "widescreen")
+      AnimaniacsPC::SetWidescreenEnabled(std::atoi(value.c_str()) != 0);
+    else if (key == "aspect_override")
+      AnimaniacsPC::SetAspectOverride(std::strtof(value.c_str(), nullptr));
+    else if (key == "fov")
+      AnimaniacsPC::SetFovDegrees(std::strtof(value.c_str(), nullptr));
+    else if (key == "fps_target")
+      AnimaniacsPC::SetFpsTarget(std::atoi(value.c_str()));
+    else if (key == "internal_resolution")
+      Config::SetCurrent(Config::GFX_EFB_SCALE, std::clamp(std::atoi(value.c_str()), 1, 12));
+    else if (key == "vsync")
+      Config::SetCurrent(Config::GFX_VSYNC, std::atoi(value.c_str()) != 0);
+  }
+
+  ApplyAnimaniacsPresentationMode();
+}
+
+void DrawAnimaniacsPcMenu()
+{
+  LoadAnimaniacsSettingsOnce();
+
+  // Presenter owns the actual graphics backbuffer size. The Wayland configure
+  // size is logical (and may be 0x0 or fractionally scaled on GNOME), so use
+  // the renderer dimensions for Auto aspect.
+  if (g_presenter && g_presenter->GetBackbufferWidth() > 0 &&
+      g_presenter->GetBackbufferHeight() > 0)
+  {
+    AnimaniacsPC::SetHostAspect(
+        static_cast<float>(g_presenter->GetBackbufferWidth()) /
+        static_cast<float>(g_presenter->GetBackbufferHeight()));
+  }
+
+  if (!AnimaniacsPC::OverlayVisible())
+    return;
+
+  ImGuiIO& io = ImGui::GetIO();
+  ImGui::SetNextWindowSize(ImVec2(std::min(680.0f, io.DisplaySize.x * 0.90f),
+                                  std::min(520.0f, io.DisplaySize.y * 0.90f)),
+                           ImGuiCond_FirstUseEver);
+
+  bool changed = false;
+
+  if (ImGui::Begin("Animaniacs PC Settings | Ctrl+F10", nullptr,
+                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings))
+  {
+    ImGui::TextUnformatted("Animaniacs: The Great Edgar Hunt [GANE7U]");
+    ImGui::Separator();
+
+    int scale = std::clamp(Config::Get(Config::GFX_EFB_SCALE), 1, 12);
+    const char* scales[] = {"1x Native", "2x", "3x (~1080p)", "4x (~1440p)",
+                            "5x", "6x (~4K)", "7x", "8x", "9x", "10x", "11x", "12x"};
+    int scale_index = scale - 1;
+    if (ImGui::Combo("Internal resolution", &scale_index, scales, 12))
+    {
+      Config::SetCurrent(Config::GFX_EFB_SCALE, scale_index + 1);
+      changed = true;
+    }
+
+    bool vsync = Config::Get(Config::GFX_VSYNC);
+    if (ImGui::Checkbox("V-Sync", &vsync))
+    {
+      Config::SetCurrent(Config::GFX_VSYNC, vsync);
+      changed = true;
+    }
+
+    ImGui::SeparatorText("Frame rate");
+
+    int fps_target = AnimaniacsPC::FpsTarget();
+    if (ImGui::SliderInt("Game FPS target", &fps_target, 60, 240, "%d FPS"))
+    {
+      AnimaniacsPC::SetFpsTarget(fps_target);
+      changed = true;
+    }
+    ImGui::TextDisabled(
+        "Above 60 uses GameCube VI overclock; CPU/DSP/audio clocks remain at normal speed.");
+
+    ImGui::SeparatorText("Aspect ratio");
+
+    int aspect_index = 0;
+    const float fixed_aspect = AnimaniacsPC::AspectOverride();
+    if (AnimaniacsPC::WidescreenEnabled())
+    {
+      if (std::fabs(fixed_aspect - 16.0f / 9.0f) < 0.01f)
+        aspect_index = 2;
+      else if (std::fabs(fixed_aspect - 16.0f / 10.0f) < 0.01f)
+        aspect_index = 3;
+      else if (std::fabs(fixed_aspect - 21.0f / 9.0f) < 0.02f)
+        aspect_index = 4;
+      else if (std::fabs(fixed_aspect - 32.0f / 9.0f) < 0.02f)
+        aspect_index = 5;
+      else
+        aspect_index = 1;
+    }
+
+    const char* aspects[] = {"Original 4:3", "Auto / window", "16:9",
+                             "16:10", "21:9", "32:9"};
+    if (ImGui::Combo("Widescreen", &aspect_index, aspects, 6))
+    {
+      if (aspect_index == 0)
+      {
+        AnimaniacsPC::SetWidescreenEnabled(false);
+        AnimaniacsPC::SetAspectOverride(0.0f);
+      }
+      else
+      {
+        constexpr float aspect_values[] = {
+            0.0f, 0.0f, 16.0f / 9.0f, 16.0f / 10.0f, 21.0f / 9.0f, 32.0f / 9.0f};
+        AnimaniacsPC::SetWidescreenEnabled(true);
+        AnimaniacsPC::SetAspectOverride(aspect_values[aspect_index]);
+      }
+      ApplyAnimaniacsPresentationMode();
+      changed = true;
+    }
+
+    ImGui::Text("Detected output aspect: %.3f:1", AnimaniacsPC::HostAspect());
+    ImGui::TextDisabled("Auto follows the real Vulkan backbuffer, including fullscreen.");
+
+    ImGui::SeparatorText("Field of view");
+
+    bool custom_fov = AnimaniacsPC::FovDegrees() > 0.0f;
+    if (ImGui::Checkbox("Custom FOV", &custom_fov))
+    {
+      AnimaniacsPC::SetFovDegrees(custom_fov ? 85.0f : 0.0f);
+      changed = true;
+    }
+
+    if (custom_fov)
+    {
+      float fov = AnimaniacsPC::FovDegrees();
+      if (ImGui::SliderFloat("Horizontal FOV", &fov, 50.0f, 130.0f, "%.0f deg"))
+      {
+        AnimaniacsPC::SetFovDegrees(fov);
+        changed = true;
+      }
+    }
+
+    ImGui::TextDisabled("FOV is restricted to the large gameplay perspective viewport.");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Ctrl+F10: menu   F10: pause   Alt+Enter: fullscreen");
+    if (ImGui::Button("Close"))
+      AnimaniacsPC::SetOverlayVisible(false);
+  }
+  ImGui::End();
+
+  if (changed)
+    SaveAnimaniacsSettings();
+}
+}  // namespace
 
 namespace VideoCommon
 {
@@ -422,6 +663,7 @@ void OnScreenUI::Finalize()
   DrawDebugText();
   OSD::DrawMessages();
   DrawChallengesAndLeaderboards();
+  DrawAnimaniacsPcMenu();
   ImGui::Render();
 
   // Check for font changes

@@ -342,15 +342,11 @@ void CommandProcessorManager::GatherPipeBursted()
       m_cp_ctrl_reg.BPInt || m_cp_ctrl_reg.FifoOverflowIntEnable ||
       m_cp_ctrl_reg.FifoUnderflowIntEnable || m_interrupt_set.IsSet() ||
       m_interrupt_waiting.IsSet();
-  bool hi_watermark;
+  bool hi_watermark = false;
   if (cp_interrupt_logic_active) [[unlikely]]
   {
     SetCPStatusFromCPU();
     hi_watermark = m_fifo.bFF_HiWatermark.load(std::memory_order_relaxed) != 0;
-  }
-  else
-  {
-    hi_watermark = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark;
   }
 
   auto& processor_interface = m_system.GetProcessorInterface();
@@ -385,10 +381,21 @@ void CommandProcessorManager::GatherPipeBursted()
     processor_interface.m_fifo_cpu_end = fifo_end;
   }
 
+  /*
+   * The mandatory fetch_add already returns the pre-burst distance. Reuse it
+   * instead of doing a second atomic load in the common no-interrupt path.
+   * Ordering and one-GPU-wakeup-per-burst behavior remain unchanged.
+   */
+  const u32 old_distance =
+      m_fifo.CPReadWriteDistance.fetch_add(GPFifo::GATHER_PIPE_SIZE,
+                                           std::memory_order_seq_cst);
+
+  if (!cp_interrupt_logic_active)
+    hi_watermark = old_distance > m_fifo.CPHiWatermark;
+
   if (hi_watermark) [[unlikely]]
     m_system.GetCoreTiming().ForceExceptionCheck(0);
 
-  m_fifo.CPReadWriteDistance.fetch_add(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
   m_system.GetFifo().RunGpu();
 
   ASSERT_MSG(COMMANDPROCESSOR,

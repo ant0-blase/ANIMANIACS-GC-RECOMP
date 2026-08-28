@@ -5,17 +5,20 @@ import argparse
 from pathlib import Path
 import sys
 
-MARKER = "ANIMANIACS_PERF_OPT_8013F83C_V2"
+MARKER = "ANIMANIACS_PERF_OPT_8013F83C_V3"
 FUNC_SIGNATURE = "static void loop_8013F83C(CPUState* ctx)"
 
 REPLACEMENT = r'''static void loop_8013F83C(CPUState* ctx) {
-    /* ANIMANIACS_PERF_OPT_8013F83C_V2
+    /* ANIMANIACS_PERF_OPT_8013F83C_V3
      *
-     * Hot scheduler polling loop. r13 is invariant inside this loop, XER.SO
-     * cannot change here, and while the polled word stays zero the
-     * architectural r0/CR0/PC state is already the same as the previous
-     * successful iteration. Keep the memory read and cycle accounting on every
-     * iteration, but avoid rebuilding/storing identical state in steady state.
+     * GANE7U hot polling loop.
+     *
+     * V2 stopped rewriting unchanged r0/CR0/PC state. V3 also hoists the MEM1
+     * translation and keeps downcount in a host register while the word is
+     * zero. The relaxed atomic load prevents the compiler from caching a word
+     * which can be changed by another emulation thread.
+     *
+     * The portable mem_read32 path remains below for unusual addresses/hosts.
      */
     const u32 ea = ctx->gpr[13] + (u32)(s32)(-23240);
     const u32 cr_low = ctx->cr & 0x0FFFFFFFu;
@@ -23,13 +26,73 @@ REPLACEMENT = r'''static void loop_8013F83C(CPUState* ctx) {
     const u32 cr_eq = cr_low | ((0x2u | so) << 28);
     const u32 cr_gt = cr_low | ((0x4u | so) << 28);
 
+#if defined(__GNUC__) || defined(__clang__)
+    const u32 masked_ea = ea & ~0x40000000u;
+    const u32 offset = masked_ea - GC_RAM_BASE;
+
+    if (ctx->ram != 0 && (ea & 3u) == 0u && offset <= GC_MAIN_RAM_SIZE - 4u) {
+        const u32* const poll_word =
+            (const u32*)(const void*)(ctx->ram + offset);
+        s64 downcount = ctx->downcount;
+
+        ctx->pc = 0x8013F83Cu;
+
+        downcount -= 3;
+        u32 raw = __atomic_load_n(poll_word, __ATOMIC_RELAXED);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        u32 value = raw;
+#else
+        u32 value = __builtin_bswap32(raw);
+#endif
+        ctx->gpr[0] = value;
+
+        if (value != 0u) {
+            ctx->downcount = downcount;
+            ctx->cr = cr_gt;
+            ctx->pc = 0x8013F848u;
+            return;
+        }
+
+        ctx->cr = cr_eq;
+
+        if (downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
+            ctx->downcount = downcount;
+            return;
+        }
+
+        for (;;) {
+            downcount -= 3;
+            raw = __atomic_load_n(poll_word, __ATOMIC_RELAXED);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            value = raw;
+#else
+            value = __builtin_bswap32(raw);
+#endif
+
+            if (value != 0u) {
+                ctx->downcount = downcount;
+                ctx->gpr[0] = value;
+                ctx->cr = cr_gt;
+                ctx->pc = 0x8013F848u;
+                return;
+            }
+
+            if (downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
+                ctx->downcount = downcount;
+                return;
+            }
+        }
+    }
+#endif
+
+    /* Exact portable/MMIO fallback: V2 behavior. */
     ctx->pc = 0x8013F83Cu;
 
     ctx->downcount -= 3;
     u32 value = mem_read32(ctx, ea);
     ctx->gpr[0] = value;
 
-    if (value != 0) {
+    if (value != 0u) {
         ctx->cr = cr_gt;
         ctx->pc = 0x8013F848u;
         return;
@@ -44,7 +107,7 @@ REPLACEMENT = r'''static void loop_8013F83C(CPUState* ctx) {
         ctx->downcount -= 3;
         value = mem_read32(ctx, ea);
 
-        if (value != 0) {
+        if (value != 0u) {
             ctx->gpr[0] = value;
             ctx->cr = cr_gt;
             ctx->pc = 0x8013F848u;
@@ -138,10 +201,21 @@ def main() -> int:
         print(f"error: generated chunk directory is missing: {chunks}", file=sys.stderr)
         return 1
 
-    candidates = sorted(chunks.glob("chunk_*_text1_8013F300.c"))
+    # Locate by function signature, not by a chunk filename. This also makes
+    # the optimization survive future code-generator chunk-boundary changes.
+    candidates = []
+    for candidate in sorted(chunks.glob("chunk_*_text1_*.c")):
+        try:
+            candidate_text = candidate.read_text()
+        except UnicodeDecodeError:
+            continue
+        if FUNC_SIGNATURE in candidate_text:
+            candidates.append(candidate)
+
     if len(candidates) != 1:
         print(
-            f"error: expected exactly one 8013F300 chunk, found {len(candidates)} in {chunks}",
+            f"error: expected exactly one generated {FUNC_SIGNATURE}, "
+            f"found {len(candidates)} in {chunks}",
             file=sys.stderr,
         )
         for candidate in candidates:

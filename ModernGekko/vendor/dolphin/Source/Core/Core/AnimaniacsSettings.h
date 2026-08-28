@@ -16,6 +16,7 @@ inline std::atomic<int> s_surface_width{0};
 inline std::atomic<int> s_surface_height{0};
 inline std::atomic<float> s_fov_degrees{0.0f};
 inline std::atomic<int> s_fps_target{60};
+inline std::atomic<bool> s_hud_aspect_correction{true};
 
 inline bool OverlayVisible()
 {
@@ -134,6 +135,17 @@ inline int FpsTarget()
 inline void SetFpsTarget(int fps)
 {
   s_fps_target.store(std::clamp(fps, 60, 360), std::memory_order_relaxed);
+}
+
+
+inline bool HudAspectCorrectionEnabled()
+{
+  return s_hud_aspect_correction.load(std::memory_order_relaxed);
+}
+
+inline void SetHudAspectCorrectionEnabled(bool enabled)
+{
+  s_hud_aspect_correction.store(enabled, std::memory_order_relaxed);
 }
 
 }  // namespace AnimaniacsPC

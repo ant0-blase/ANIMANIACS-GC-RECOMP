@@ -12,6 +12,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/Matrix.h"
+#include "Core/AnimaniacsSettings.h"
 #include "VideoCommon/BPFunctions.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CPMemory.h"
@@ -76,15 +77,36 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 
   case ProjectionType::Orthographic:
   {
-    m_projection_matrix[0] = rawProjection[0];
+    // ANIMANIACS dynamic 2D preservation.
+    //
+    // This is the same policy used by the working HPCOS widescreen path:
+    // keep 2D/HUD geometry in its native 4:3 proportions before the final XFB
+    // is presented at the selected host aspect.  Icons stay round and text is
+    // not flattened, while the perspective world is handled guest-side.
+    float anim_ui_scale_x = 1.0f;
+    float anim_ui_scale_y = 1.0f;
+
+    if (AnimaniacsPC::HudAspectCorrectionEnabled() &&
+        AnimaniacsPC::WidescreenEnabled())
+    {
+      constexpr float original_aspect = 4.0f / 3.0f;
+      const float target_aspect = AnimaniacsPC::TargetAspect();
+
+      if (std::isfinite(target_aspect) && target_aspect > original_aspect + 0.0001f)
+        anim_ui_scale_x = original_aspect / target_aspect;
+      else if (std::isfinite(target_aspect) && target_aspect < original_aspect - 0.0001f)
+        anim_ui_scale_y = target_aspect / original_aspect;
+    }
+
+    m_projection_matrix[0] = rawProjection[0] * anim_ui_scale_x;
     m_projection_matrix[1] = 0.0f;
     m_projection_matrix[2] = 0.0f;
-    m_projection_matrix[3] = rawProjection[1];
+    m_projection_matrix[3] = rawProjection[1] * anim_ui_scale_x;
 
     m_projection_matrix[4] = 0.0f;
-    m_projection_matrix[5] = rawProjection[2];
+    m_projection_matrix[5] = rawProjection[2] * anim_ui_scale_y;
     m_projection_matrix[6] = 0.0f;
-    m_projection_matrix[7] = rawProjection[3];
+    m_projection_matrix[7] = rawProjection[3] * anim_ui_scale_y;
 
     m_projection_matrix[8] = 0.0f;
     m_projection_matrix[9] = 0.0f;

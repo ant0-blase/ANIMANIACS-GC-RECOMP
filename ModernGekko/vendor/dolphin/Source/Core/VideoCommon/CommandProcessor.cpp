@@ -347,10 +347,10 @@ void CommandProcessorManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 
 void CommandProcessorManager::GatherPipeBursted()
 {
+  // ANIM_GATHER_FAST_STATUS_GATE_V12_5
   const bool cp_interrupt_logic_active =
-      m_cp_ctrl_reg.BPInt || m_cp_ctrl_reg.FifoOverflowIntEnable ||
-      m_cp_ctrl_reg.FifoUnderflowIntEnable || m_interrupt_set.IsSet() ||
-      m_interrupt_waiting.IsSet();
+      m_fifo.bFF_StatusInterruptsEnabled.load(std::memory_order_relaxed) != 0 ||
+      m_interrupt_set.IsSet() || m_interrupt_waiting.IsSet();
   bool hi_watermark = false;
   if (cp_interrupt_logic_active) [[unlikely]]
   {
@@ -423,8 +423,10 @@ void CommandProcessorManager::GatherPipeBursted()
   if (needs_gpu_wakeup)
     m_system.GetFifo().RunGpu();
 
+  // ANIM_GATHER_DEBUG_ASSERTS_V12_5
+#ifndef NDEBUG
   ASSERT_MSG(COMMANDPROCESSOR,
-             m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) <=
+             new_distance <=
                  m_fifo.CPEnd.load(std::memory_order_relaxed) -
                      m_fifo.CPBase.load(std::memory_order_relaxed),
              "FIFO is overflowed by GatherPipe !\nCPU thread is too fast!");
@@ -437,7 +439,8 @@ void CommandProcessorManager::GatherPipeBursted()
              "FIFOs linked but out of sync");
   ASSERT_MSG(COMMANDPROCESSOR,
              m_fifo.CPEnd.load(std::memory_order_relaxed) == processor_interface.m_fifo_cpu_end,
-             "FIFOs linked but out of sync");
+             "FIFOs linked but out of sync");#endif
+
 }
 
 void CommandProcessorManager::UpdateInterrupts(u64 userdata)

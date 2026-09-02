@@ -439,7 +439,8 @@ void CommandProcessorManager::GatherPipeBursted()
              "FIFOs linked but out of sync");
   ASSERT_MSG(COMMANDPROCESSOR,
              m_fifo.CPEnd.load(std::memory_order_relaxed) == processor_interface.m_fifo_cpu_end,
-             "FIFOs linked but out of sync");#endif
+             "FIFOs linked but out of sync");
+#endif
 
 }
 

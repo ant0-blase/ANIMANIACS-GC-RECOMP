@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **LEGACY PROJECT — NO LONGER MAINTAINED.** This repository is kept as a historical snapshot; it will not receive further fixes, compatibility updates, or new enhancements. Development has moved to **[GekkoAOT](https://github.com/ant0-blase/GekkoAOT)**, the successor GameCube recompilation project. For the latest runtime, graphics, performance and compatibility improvements—and to try running this game through the current project—please use GekkoAOT instead. Game compatibility is still evolving; check its [compatibility list](https://github.com/ant0-blase/GekkoAOT#compatibility) before expecting a complete playthrough.
+
 # Animaniacs: The Great Edgar Hunt — GameCube Static Recompilation
 
 Experimental native PC port of the **GameCube USA release of _Animaniacs: The Great Edgar Hunt_** (`GANE7U`) built with **DolRecomp + ModernGekko**.
